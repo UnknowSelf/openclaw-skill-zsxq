@@ -1,0 +1,15 @@
+{
+  "name": "zsxq-summary",
+  "version": "1.0.0",
+  "description": "知识星球内容抓取与汇总",
+  "main": "fetch_topics.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "pdf-parse": "^1.1.1"
+  }
+}
