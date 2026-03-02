@@ -28,7 +28,9 @@ echo ""
 echo "==> 验证安装..."
 node -e "
 const pdfParse = require('pdf-parse');
+const mammoth = require('mammoth');
 console.log('  pdf-parse: OK');
+console.log('  mammoth: OK');
 console.log('');
 console.log('==> 全部就绪！');
 "
