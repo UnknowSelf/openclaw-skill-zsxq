@@ -1,6 +1,6 @@
 # zsxq-summary
 
-知识星球内容抓取与投资分析 — [OpenClaw](https://github.com/nicepkg/openclaw) Skill
+知识星球内容抓取与投资分析 — OpenClaw Skill
 
 自动抓取知识星球帖子、解析文档附件（PDF、DOCX 研报等），由 AI 生成汇总摘要和投资参考建议。
 
@@ -26,7 +26,7 @@ openclaw skill install openclaw-zsxq-summary
 
 ```bash
 # 克隆到 skills 目录
-git clone https://github.com/xiaobaibaoxiaojimao/openclaw-zsxq-summary.git \
+git clone https://github.com/UnknowSelf/openclaw-zsxq-summary.git \
   ~/.openclaw/skills/zsxq-summary
 
 # 安装依赖

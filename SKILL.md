@@ -363,6 +363,9 @@ console.log(JSON.stringify({
 - 可以离线分析
 - 附件按日期归档，便于后续查阅
 
+#### 步骤 5：汇总分析
+结合 Markdown 文件内容和文档附件文本，按报告格式输出。
+
 ---
 
 ### 模式 B：传统 API 模式（topics + download-pdf）
@@ -374,8 +377,6 @@ console.log(JSON.stringify({
 - 验证 `$ZSXQ_TOKEN` 已设置
 - 读取 `{baseDir}/groups.json`（星球配置）
 - 确定目标日期（今天、昨天或用户指定的日期）
-
-#### 步骤 2：导出帖子和附件
 
 #### 步骤 2：抓取帖子
 
