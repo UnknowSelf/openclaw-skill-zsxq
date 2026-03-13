@@ -576,13 +576,27 @@ async function downloadBinaryFromUrl(url, timeout = 30000, maxRetries = 3) {
 
 async function downloadFileAttachment(file, destDir, fileIndex, topicId) {
   const safeName = sanitizeFileName(file.name || `file_${file.file_id}`);
+  const fileName = safeName;
+  const absPath = path.join(destDir, fileName);
+
+  // 检查文件是否已存在
+  if (fs.existsSync(absPath)) {
+    const stats = fs.statSync(absPath);
+    console.error(`[zsxq] file already exists, skipping: ${fileName}`);
+    return {
+      kind: 'file',
+      file_id: file.file_id,
+      original_name: file.name,
+      saved_name: fileName,
+      size: stats.size,
+      abs_path: absPath,
+    };
+  }
 
   const downloadUrl = await getFileDownloadUrl(file.file_id);
   await sleep(1000);
   const downloadRes = await downloadBinaryFromUrl(downloadUrl, 30000);
 
-  const fileName = safeName;
-  const absPath = path.join(destDir, fileName);
   await writeBinaryFile(absPath, downloadRes.body);
 
   return {
@@ -601,23 +615,40 @@ async function downloadImageAttachment(image, destDir, imageIndex, topicId) {
     throw new Error('image url missing');
   }
 
+  // 先尝试检查文件是否已存在（需要先确定文件名）
+  const extByImageType = image.type ? `.${String(image.type).toLowerCase().replace(/^\./, '')}` : '.jpg';
+  const fileName = `image_${image.image_id || imageIndex}${extByImageType}`;
+  const absPath = path.join(destDir, sanitizeFileName(fileName));
+
+  if (fs.existsSync(absPath)) {
+    const stats = fs.statSync(absPath);
+    console.error(`[zsxq] image already exists, skipping: ${fileName}`);
+    return {
+      kind: 'image',
+      image_id: image.image_id,
+      saved_name: path.basename(absPath),
+      size: stats.size,
+      abs_path: absPath,
+      source_url: candidates[0],
+    };
+  }
+
   let lastErr;
   for (const candidate of candidates) {
     try {
       const imgRes = await downloadBinaryFromUrl(candidate, 30000);
       const extByType = detectExtByHeaders(imgRes.headers);
-      const extByImageType = image.type ? `.${String(image.type).toLowerCase().replace(/^\./, '')}` : '';
-      const ext = extByType || extByImageType || '.jpg';
-      const fileName = `image_${image.image_id || imageIndex}${ext}`;
-      const absPath = path.join(destDir, sanitizeFileName(fileName));
-      await writeBinaryFile(absPath, imgRes.body);
+      const ext = extByType || extByImageType;
+      const finalFileName = `image_${image.image_id || imageIndex}${ext}`;
+      const finalAbsPath = path.join(destDir, sanitizeFileName(finalFileName));
+      await writeBinaryFile(finalAbsPath, imgRes.body);
 
       return {
         kind: 'image',
         image_id: image.image_id,
-        saved_name: path.basename(absPath),
+        saved_name: path.basename(finalAbsPath),
         size: imgRes.body.length,
-        abs_path: absPath,
+        abs_path: finalAbsPath,
         source_url: candidate,
       };
     } catch (err) {
@@ -938,7 +969,7 @@ async function exportTopicsToMarkdown() {
   let topicsCount = 0;
   let currentFileIndex = 1;
   let topicsInCurrentFile = 0;
-  const topicsPerFile = 80; // 每4页（4 * 20 = 80个帖子）生成一个文件
+  const topicsPerFile = 100; // 每5页（5 * 20 = 100个帖子）生成一个文件
   
   // 生成当前文件名
   const getMarkdownFileName = (fileIndex) => {
