@@ -373,6 +373,9 @@ console.log(JSON.stringify({
 
 - 验证 `$ZSXQ_TOKEN` 已设置
 - 读取 `{baseDir}/groups.json`（星球配置）
+- 确定目标日期（今天、昨天或用户指定的日期）
+
+#### 步骤 2：导出帖子和附件
 
 #### 步骤 2：抓取帖子
 
@@ -435,7 +438,7 @@ node {baseDir}/fetch_topics.js download-docx <file_id>
 
 ---
 
-### 一、帖子观点摘要
+# 一、帖子观点摘要
 
 **展示策略（大规模数据）**：
 - 相似观点合并（如多个帖子都看好某板块，合并为一条）
