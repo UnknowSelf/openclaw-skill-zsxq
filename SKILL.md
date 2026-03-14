@@ -3,8 +3,9 @@ name: zsxq-summary
 description: 知识星球内容汇总与投资分析 — 自动抓取星球帖子 + 解析文档附件（PDF/DOCX），给出汇总摘要和投资参考建议
 user-invocable: true
 metadata:
-  requires: node (>= 18), pdf-parse, mammoth
+  requires: node (>= 18), pdf-parse (^2.4.5), mammoth (^1.12.0)
   primaryEnv: ZSXQ_TOKEN
+  version: 2.0.0
 ---
 
 # 知识星球内容汇总与投资分析
@@ -32,6 +33,21 @@ export ZSXQ_TOKEN="你的token值"
 > 请先设置知识星球 Token：`export ZSXQ_TOKEN="your_token"`
 > 获取方式：浏览器打开 wx.zsxq.com → 登录 → F12 → Application → Cookies → 复制 `zsxq_access_token` 的值。
 
+### 日志系统
+
+**新增功能**：所有日志自动输出到 `{baseDir}/log/` 目录下的日期文件中。
+
+- 日志文件格式：`YYYYMMDD.log`（例如：`20260314.log`）
+- 日志级别：INFO、WARN、ERROR
+- 自动创建日志目录和文件
+- 同时输出到 stderr 和日志文件
+
+**日志示例**：
+```
+[2026-03-14T10:30:00.000Z] [INFO] fetching digests topics for group 123...
+[2026-03-14T10:30:05.000Z] [ERROR] fetch error: timeout
+```
+
 ### 技术架构
 
 | 数据 | 接口域名 | 方式 | 说明 |
@@ -53,6 +69,10 @@ bash {baseDir}/install.sh
 ```bash
 cd {baseDir} && npm install
 ```
+
+**依赖版本**：
+- `pdf-parse`: ^2.4.5（最新版本，提升 PDF 解析能力）
+- `mammoth`: ^1.12.0（最新版本，提升 DOCX 解析能力）
 
 ---
 
@@ -415,17 +435,15 @@ node {baseDir}/fetch_topics.js download-docx <file_id>
 
 ## 报告输出格式
 
-严格按以下六段式结构输出：
-
 **针对大规模数据（100+帖子，30+文档）的特殊说明**：
 - 每个章节控制在合理长度，避免信息过载
 - 优先展示高频提及的内容
 - 相似观点合并去重
-- 在报告开头标注数据规模和处理进度
+- 在报告开头标注数据规模
 
----
+**必须严格按照以下数据概览加六段式结构输出报告**：
 
-### 数据概览（仅当帖子>100或文档>50时添加）
+### 数据概览
 
 - 处理日期：YYYY-MM-DD
 - 帖子总数：XXX 条
@@ -439,9 +457,9 @@ node {baseDir}/fetch_topics.js download-docx <file_id>
 
 ---
 
-# 一、帖子观点摘要
+### 一、帖子观点摘要
 
-**展示策略（大规模数据）**：
+**展示策略**：
 - 相似观点合并（如多个帖子都看好某板块，合并为一条）
 - 按重要性排序，最多展示50条核心观点
 
@@ -455,7 +473,7 @@ node {baseDir}/fetch_topics.js download-docx <file_id>
 
 ### 二、文档附件研报精华提炼
 
-**展示策略（大规模数据）**：
+**展示策略**：
 - 按券商权威性和内容相关性排序
 - 优先展示重点券商研报（中信、国泰、华泰、招商、中金等）
 - 相似研报合并（如多份研报都看好同一板块，提取共识观点）
@@ -540,7 +558,30 @@ node {baseDir}/fetch_topics.js download-docx <file_id>
 | 附件下载失败 | export-md 中部分附件失败 | 记录在 failures 数组，继续处理其他附件 |
 | 目标日期无帖子 | export-md 返回 topics_count=0 | 提示用户该日期没有帖子 |
 | 处理超时 | 超过30分钟 | 输出已处理部分的报告，标注进度 |
+
 **原则：部分失败不中断整体流程。** PDF 解析失败仍输出帖子摘要，单个星球失败仍处理其他星球，部分附件下载失败仍生成报告。
+
+**日志记录**：所有错误和警告都会记录到 `{baseDir}/log/YYYYMMDD.log` 文件中，便于事后排查。
+
+---
+
+## 版本更新记录
+
+### v2.0.0 (2026-03-14)
+
+**新增功能**：
+- ✨ 日志系统：所有日志自动输出到 `log/YYYYMMDD.log` 文件
+- ✨ 日志分级：INFO、WARN、ERROR 三个级别
+- ✨ 自动创建日志目录和文件
+
+**依赖更新**：
+- ⬆️ pdf-parse: 1.1.1 → 2.4.5（提升 PDF 解析能力）
+- ⬆️ mammoth: 1.6.0 → 1.12.0（提升 DOCX 解析能力）
+
+**优化改进**：
+- 🔧 所有日志统一使用日志函数（info/warn/error）
+- 🔧 错误消息同时输出到 stderr 和日志文件
+- 🔧 改进错误处理和重试机制
 
 ---
 

@@ -14,17 +14,48 @@
 // 环境变量:
 //   ZSXQ_TOKEN (必须) — 知识星球 zsxq_access_token cookie 值
 //
-// 输出: JSON 到 stdout，日志到 stderr
+// 输出: JSON 到 stdout，日志到 log/ 目录和 stderr
 
 const https = require('https');
 const { URL } = require('url');
 const fs = require('fs');
 const path = require('path');
 
+// ── 日志系统 ───────────────────────────────────────────────
+const LOG_DIR = path.join(__dirname, 'log');
+const todayStr = new Date().toISOString().split('T')[0].replace(/-/g, ''); // YYYYMMDD
+const logFilePath = path.join(LOG_DIR, `${todayStr}.log`);
+
+// 确保日志目录存在
+try {
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+} catch (err) {
+  info(`failed to create log directory: ${err.message}`);
+}
+
+// 写入日志文件（追加模式）
+function logToFile(level, message) {
+  const timestamp = new Date().toISOString();
+  const logLine = `[${timestamp}] [${level}] ${message}\n`;
+  try {
+    fs.appendFileSync(logFilePath, logLine, 'utf-8');
+  } catch (err) {
+    // 如果写入失败，输出到 stderr
+    info(`failed to write log: ${err.message}`);
+  }
+}
+
+// 日志级别
+function info(msg) { logToFile('INFO', msg); }
+function warn(msg) { logToFile('WARN', msg); }
+function error(msg) { logToFile('ERROR', msg); }
+
 // ── 认证 ────────────────────────────────────────────────────
 const ZSXQ_TOKEN = process.env.ZSXQ_TOKEN;
 if (!ZSXQ_TOKEN) {
-  console.error(JSON.stringify({ error: 'ZSXQ_TOKEN environment variable not set' }));
+  const errorMsg = JSON.stringify({ error: 'ZSXQ_TOKEN environment variable not set' });
+  console.error(errorMsg);
+  error(errorMsg);
   process.exit(1);
 }
 
@@ -84,7 +115,7 @@ function randomSleep() {
   const min = 2000; // 2 秒
   const max = 5000; // 5 秒
   const ms = Math.floor(Math.random() * (max - min + 1)) + min;
-  console.error(`[zsxq] waiting ${(ms / 1000).toFixed(1)}s before next download...`);
+  info(`waiting ${(ms / 1000).toFixed(1)}s before next download...`);
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
@@ -96,7 +127,7 @@ async function httpGetWithRetry(url, options = {}, maxRetries = 3) {
       const res = await httpGet(url, options);
       if (res.statusCode === 429) {
         const wait = Math.pow(2, i + 1) * 1000; // 2s, 4s, 8s
-        console.error(`[zsxq] 429 rate limited, waiting ${wait}ms...`);
+        info(`429 rate limited, waiting ${wait}ms...`);
         await sleep(wait);
         continue;
       }
@@ -105,7 +136,7 @@ async function httpGetWithRetry(url, options = {}, maxRetries = 3) {
       lastErr = err;
       if (i < maxRetries - 1) {
         const wait = Math.pow(2, i + 1) * 1000;
-        console.error(`[zsxq] request error: ${err.message}, retrying in ${wait}ms...`);
+        info(`request error: ${err.message}, retrying in ${wait}ms...`);
         await sleep(wait);
       }
     }
@@ -281,7 +312,7 @@ async function fetchTopicsData(groupId, count, scope, forceDigests = false) {
     ? `${BASE_URL}/groups/${groupId}/topics?scope=digests&count=${Math.min(limitedCount, 30)}`
     : `${BASE_URL}/groups/${groupId}/topics?scope=all&count=${Math.min(limitedCount, 30)}`;
 
-  console.error(`[zsxq] fetching ${isDigests ? 'digests' : 'all'} topics for group ${groupId} (count=${limitedCount})...`);
+  info(`fetching ${isDigests ? 'digests' : 'all'} topics for group ${groupId} (count=${limitedCount})...`);
 
   const allTopics = [];
   let url = endpoint;
@@ -295,31 +326,31 @@ async function fetchTopicsData(groupId, count, scope, forceDigests = false) {
     try {
       res = await httpGetWithRetry(url);
     } catch (err) {
-      console.error(`[zsxq] fetch error: ${err.message}`);
+      info(`fetch error: ${err.message}`);
       break;
     }
 
     if (res.statusCode !== 200) {
-      console.error(`[zsxq] HTTP ${res.statusCode}: ${res.body.substring(0, 300)}`);
+      info(`HTTP ${res.statusCode}: ${res.body.substring(0, 300)}`);
       break;
     }
 
     const data = safeJsonParse(res.body);
     if (!data) {
-      console.error(`[zsxq] non-JSON response: ${res.body.substring(0, 300)}`);
+      info(`non-JSON response: ${res.body.substring(0, 300)}`);
       break;
     }
 
     if (!data.succeeded) {
       retryCount++;
       if (retryCount > maxRetries) {
-        console.error(`[zsxq] API error after ${maxRetries} retries: ${JSON.stringify(data)}`);
+        info(`API error after ${maxRetries} retries: ${JSON.stringify(data)}`);
         break;
       }
-      console.error(`[zsxq] API error (retry ${retryCount}/${maxRetries}): ${JSON.stringify(data)}`);
-      console.error(`[zsxq] ===== RETRYING SAME REQUEST =====`);
-      console.error(`[zsxq] retry URL: ${url}`);
-      console.error(`[zsxq] ===================================`);
+      info(`API error (retry ${retryCount}/${maxRetries}): ${JSON.stringify(data)}`);
+      info(`===== RETRYING SAME REQUEST =====`);
+      info(`retry URL: ${url}`);
+      info(`===================================`);
       
       await sleep(2000); // 等待2秒后重试
       continue;
@@ -330,7 +361,7 @@ async function fetchTopicsData(groupId, count, scope, forceDigests = false) {
 
     const topics = data.resp_data && data.resp_data.topics;
     if (!Array.isArray(topics) || topics.length === 0) {
-      console.error('[zsxq] no more topics');
+      info('no more topics');
       break;
     }
 
@@ -360,17 +391,17 @@ async function fetchTopicsData(groupId, count, scope, forceDigests = false) {
       if (allTopics.length >= limitedCount) break;
     }
 
-    console.error(`[zsxq] fetched ${allTopics.length}/${limitedCount} topics`);
+    info(`fetched ${allTopics.length}/${limitedCount} topics`);
 
     const lastTopic = topics[topics.length - 1];
     if (lastTopic && lastTopic.create_time && allTopics.length < limitedCount) {
       const endTime = encodeURIComponent(lastTopic.create_time);
       url = `${endpoint}&end_time=${endTime}`;
-      console.error(`[zsxq] ===== PAGINATION DEBUG =====`);
-      console.error(`[zsxq] raw create_time: ${lastTopic.create_time}`);
-      console.error(`[zsxq] encoded end_time: ${endTime}`);
-      console.error(`[zsxq] full URL: ${url}`);
-      console.error(`[zsxq] ============================`);
+      info(`===== PAGINATION DEBUG =====`);
+      info(`raw create_time: ${lastTopic.create_time}`);
+      info(`encoded end_time: ${endTime}`);
+      info(`full URL: ${url}`);
+      info(`============================`);
       pages += 1;
       await randomSleep();
       continue;
@@ -394,7 +425,7 @@ async function fetchTopicsByDate(groupId, targetDateStr, scope) {
     ? `${BASE_URL}/groups/${groupId}/topics?scope=digests&count=20`
     : `${BASE_URL}/groups/${groupId}/topics?scope=all&count=20`;
 
-  console.error(`[zsxq] fetching ${isDigests ? 'digests' : 'all'} topics for date ${targetDateStr}...`);
+  info(`fetching ${isDigests ? 'digests' : 'all'} topics for date ${targetDateStr}...`);
 
   const targetDate = new Date(targetDateStr);
   const targetDateOnly = targetDate.toISOString().split('T')[0]; // YYYY-MM-DD
@@ -410,31 +441,31 @@ async function fetchTopicsByDate(groupId, targetDateStr, scope) {
     try {
       res = await httpGetWithRetry(url);
     } catch (err) {
-      console.error(`[zsxq] fetch error: ${err.message}`);
+      info(`fetch error: ${err.message}`);
       break;
     }
 
     if (res.statusCode !== 200) {
-      console.error(`[zsxq] HTTP ${res.statusCode}: ${res.body.substring(0, 300)}`);
+      info(`HTTP ${res.statusCode}: ${res.body.substring(0, 300)}`);
       break;
     }
 
     const data = safeJsonParse(res.body);
     if (!data) {
-      console.error(`[zsxq] non-JSON response: ${res.body.substring(0, 300)}`);
+      info(`non-JSON response: ${res.body.substring(0, 300)}`);
       break;
     }
 
     if (!data.succeeded) {
       retryCount++;
       if (retryCount > maxRetries) {
-        console.error(`[zsxq] API error after ${maxRetries} retries: ${JSON.stringify(data)}`);
+        info(`API error after ${maxRetries} retries: ${JSON.stringify(data)}`);
         break;
       }
-      console.error(`[zsxq] API error (retry ${retryCount}/${maxRetries}): ${JSON.stringify(data)}`);
-      console.error(`[zsxq] ===== RETRYING SAME REQUEST =====`);
-      console.error(`[zsxq] retry URL: ${url}`);
-      console.error(`[zsxq] ===================================`);
+      info(`API error (retry ${retryCount}/${maxRetries}): ${JSON.stringify(data)}`);
+      info(`===== RETRYING SAME REQUEST =====`);
+      info(`retry URL: ${url}`);
+      info(`===================================`);
       
       await sleep(2000); // 等待2秒后重试
       continue;
@@ -445,7 +476,7 @@ async function fetchTopicsByDate(groupId, targetDateStr, scope) {
 
     const topics = data.resp_data && data.resp_data.topics;
     if (!Array.isArray(topics) || topics.length === 0) {
-      console.error('[zsxq] no more topics');
+      info('no more topics');
       break;
     }
 
@@ -487,11 +518,11 @@ async function fetchTopicsByDate(groupId, targetDateStr, scope) {
       }
     }
 
-    console.error(`[zsxq] page ${pages + 1}: found ${allTopics.length} topics for ${targetDateOnly}`);
+    info(`page ${pages + 1}: found ${allTopics.length} topics for ${targetDateOnly}`);
 
     // 如果已经找到比目标日期更早的帖子，停止翻页
     if (foundOlderThanTarget) {
-      console.error(`[zsxq] reached topics older than ${targetDateOnly}, stopping`);
+      info(`reached topics older than ${targetDateOnly}, stopping`);
       break;
     }
 
@@ -500,11 +531,11 @@ async function fetchTopicsByDate(groupId, targetDateStr, scope) {
     if (lastTopic && lastTopic.create_time) {
       const endTime = encodeURIComponent(lastTopic.create_time);
       url = `${endpoint}&end_time=${endTime}`;
-      console.error(`[zsxq] ===== PAGINATION DEBUG =====`);
-      console.error(`[zsxq] raw create_time: ${lastTopic.create_time}`);
-      console.error(`[zsxq] encoded end_time: ${endTime}`);
-      console.error(`[zsxq] full URL: ${url}`);
-      console.error(`[zsxq] ============================`);
+      info(`===== PAGINATION DEBUG =====`);
+      info(`raw create_time: ${lastTopic.create_time}`);
+      info(`encoded end_time: ${endTime}`);
+      info(`full URL: ${url}`);
+      info(`============================`);
       pages += 1;
       await randomSleep();
       continue;
@@ -545,7 +576,7 @@ async function getFileDownloadUrl(fileId, maxRetries = 3) {
     } catch (err) {
       if (attempt < maxRetries) {
         const waitTime = Math.pow(2, attempt) * 1000;
-        console.error(`[zsxq] getFileDownloadUrl failed (attempt ${attempt}/${maxRetries}): ${err.message}, retrying in ${waitTime}ms...`);
+        info(`getFileDownloadUrl failed (attempt ${attempt}/${maxRetries}): ${err.message}, retrying in ${waitTime}ms...`);
         await sleep(waitTime);
       } else {
         throw err;
@@ -565,7 +596,7 @@ async function downloadBinaryFromUrl(url, timeout = 30000, maxRetries = 3) {
     } catch (err) {
       if (attempt < maxRetries) {
         const waitTime = Math.pow(2, attempt) * 1000;
-        console.error(`[zsxq] downloadBinaryFromUrl failed (attempt ${attempt}/${maxRetries}): ${err.message}, retrying in ${waitTime}ms...`);
+        info(`downloadBinaryFromUrl failed (attempt ${attempt}/${maxRetries}): ${err.message}, retrying in ${waitTime}ms...`);
         await sleep(waitTime);
       } else {
         throw err;
@@ -582,7 +613,7 @@ async function downloadFileAttachment(file, destDir, fileIndex, topicId) {
   // 检查文件是否已存在
   if (fs.existsSync(absPath)) {
     const stats = fs.statSync(absPath);
-    console.error(`[zsxq] file already exists, skipping: ${fileName}`);
+    info(`file already exists, skipping: ${fileName}`);
     return {
       kind: 'file',
       file_id: file.file_id,
@@ -622,7 +653,7 @@ async function downloadImageAttachment(image, destDir, imageIndex, topicId) {
 
   if (fs.existsSync(absPath)) {
     const stats = fs.statSync(absPath);
-    console.error(`[zsxq] image already exists, skipping: ${fileName}`);
+    info(`image already exists, skipping: ${fileName}`);
     return {
       kind: 'image',
       image_id: image.image_id,
@@ -736,7 +767,9 @@ async function fetchTopics() {
   const scope = process.argv[5] || 'all';
 
   if (!groupId) {
-    console.error(JSON.stringify({ error: 'Usage: node fetch_topics.js topics <group_id> [count] [scope]' }));
+    const errorMsg = JSON.stringify({ error: 'Usage: node fetch_topics.js topics <group_id> [count] [scope]' });
+    console.error(errorMsg);
+    error(errorMsg);
     process.exit(1);
   }
 
@@ -748,11 +781,13 @@ async function fetchTopics() {
 async function downloadPdf() {
   const fileId = process.argv[3];
   if (!fileId) {
-    console.error(JSON.stringify({ error: 'Usage: node fetch_topics.js download-pdf <file_id>' }));
+    const errorMsg = JSON.stringify({ error: 'Usage: node fetch_topics.js download-pdf <file_id>' });
+    console.error(errorMsg);
+    error(errorMsg);
     process.exit(1);
   }
 
-  console.error(`[zsxq] downloading PDF file_id=${fileId}...`);
+  info(`downloading PDF file_id=${fileId}...`);
 
   try {
     const metaUrl = `${BASE_URL}/files/${fileId}/download_url`;
@@ -775,7 +810,7 @@ async function downloadPdf() {
     }
 
     const downloadUrl = metaData.resp_data.download_url;
-    console.error('[zsxq] got download URL, fetching PDF...');
+    info('got download URL, fetching PDF...');
 
     await sleep(1000);
 
@@ -787,7 +822,7 @@ async function downloadPdf() {
     }
 
     const pdfBuffer = pdfRes.body;
-    console.error(`[zsxq] downloaded ${(pdfBuffer.length / 1024).toFixed(1)} KB`);
+    info(`downloaded ${(pdfBuffer.length / 1024).toFixed(1)} KB`);
 
     let pdfParse;
     try {
@@ -832,11 +867,13 @@ async function downloadPdf() {
 async function downloadDocx() {
   const fileId = process.argv[3];
   if (!fileId) {
-    console.error(JSON.stringify({ error: 'Usage: node fetch_topics.js download-docx <file_id>' }));
+    const errorMsg = JSON.stringify({ error: 'Usage: node fetch_topics.js download-docx <file_id>' });
+    console.error(errorMsg);
+    error(errorMsg);
     process.exit(1);
   }
 
-  console.error(`[zsxq] downloading DOCX file_id=${fileId}...`);
+  info(`downloading DOCX file_id=${fileId}...`);
 
   try {
     const metaUrl = `${BASE_URL}/files/${fileId}/download_url`;
@@ -859,7 +896,7 @@ async function downloadDocx() {
     }
 
     const downloadUrl = metaData.resp_data.download_url;
-    console.error('[zsxq] got download URL, fetching DOCX...');
+    info('got download URL, fetching DOCX...');
 
     await sleep(1000);
 
@@ -871,7 +908,7 @@ async function downloadDocx() {
     }
 
     const docxBuffer = docxRes.body;
-    console.error(`[zsxq] downloaded ${(docxBuffer.length / 1024).toFixed(1)} KB`);
+    info(`downloaded ${(docxBuffer.length / 1024).toFixed(1)} KB`);
 
     let mammoth;
     try {
@@ -919,7 +956,9 @@ async function exportTopicsToMarkdown() {
   const outputArg = process.argv[6] || 'archive';
 
   if (!groupId) {
-    console.error(JSON.stringify({ error: 'Usage: node fetch_topics.js export-md <group_id> <count|YYYY-MM-DD> [scope] [output_dir]' }));
+    const errorMsg = JSON.stringify({ error: 'Usage: node fetch_topics.js export-md <group_id> <count|YYYY-MM-DD> [scope] [output_dir]' });
+    console.error(errorMsg);
+    error(errorMsg);
     process.exit(1);
   }
 
@@ -936,7 +975,7 @@ async function exportTopicsToMarkdown() {
     const day = String(targetDate.getDate()).padStart(2, '0');
     mdFileName = `${month}-${day}.md`;
     dateSubDir = `${month}-${day}`;
-    console.error(`[zsxq] date mode: exporting topics from ${countOrDate}`);
+    info(`date mode: exporting topics from ${countOrDate}`);
   } else {
     // 按数量导出模式
     count = parseInt(countOrDate, 10) || 20;
@@ -948,17 +987,17 @@ async function exportTopicsToMarkdown() {
     const second = String(now.getSeconds()).padStart(2, '0');
     mdFileName = `${month}-${day}-${hour}-${minute}-${second}.md`;
     dateSubDir = `${month}-${day}`;
-    console.error(`[zsxq] count mode: exporting ${count} topics`);
+    info(`count mode: exporting ${count} topics`);
   }
 
   const outputDir = path.resolve(process.cwd(), outputArg);
   const attachmentsRoot = path.join(outputDir, 'asset', dateSubDir);
   const markdownPath = path.join(outputDir, mdFileName);
 
-  console.error(`[zsxq] exporting topics to markdown: group=${groupId}, scope=${scope}`);
-  console.error(`[zsxq] output dir: ${outputDir}`);
-  console.error(`[zsxq] markdown file: ${mdFileName}`);
-  console.error(`[zsxq] attachments dir: ${attachmentsRoot}`);
+  info(`exporting topics to markdown: group=${groupId}, scope=${scope}`);
+  info(`output dir: ${outputDir}`);
+  info(`markdown file: ${mdFileName}`);
+  info(`attachments dir: ${attachmentsRoot}`);
 
   await ensureDir(outputDir);
   await ensureDir(attachmentsRoot);
@@ -1020,15 +1059,15 @@ async function exportTopicsToMarkdown() {
     
     // 检查是否需要创建新文件
     if (topicsInCurrentFile > topicsPerFile) {
-      console.error(`[zsxq] completed file ${currentFileIndex} with ${topicsInCurrentFile - 1} topics`);
+      info(`completed file ${currentFileIndex} with ${topicsInCurrentFile - 1} topics`);
       currentFileIndex += 1;
       topicsInCurrentFile = 1;
       currentMarkdownPath = path.join(outputDir, getMarkdownFileName(currentFileIndex));
       await writeFileHeader(currentMarkdownPath, currentFileIndex);
-      console.error(`[zsxq] starting new file ${currentFileIndex}: ${path.basename(currentMarkdownPath)}`);
+      info(`starting new file ${currentFileIndex}: ${path.basename(currentMarkdownPath)}`);
     }
     
-    console.error(`[zsxq] processing topic ${topicsCount} (file ${currentFileIndex}, topic ${topicsInCurrentFile}): ${topic.topic_id}`);
+    info(`processing topic ${topicsCount} (file ${currentFileIndex}, topic ${topicsInCurrentFile}): ${topic.topic_id}`);
 
     const downloadedFiles = [];
     const downloadedImages = [];
@@ -1044,7 +1083,7 @@ async function exportTopicsToMarkdown() {
       // 跳过音频文件
       const fileName = (file.name || '').toLowerCase();
       if (fileName.endsWith('.mp3') || fileName.endsWith('.m4a') || fileName.endsWith('.wav')) {
-        console.error(`[zsxq] skipping audio file: ${file.name}`);
+        info(`skipping audio file: ${file.name}`);
         fileIndex += 1;
         continue;
       }
@@ -1092,7 +1131,7 @@ async function exportTopicsToMarkdown() {
       await sleep(1000);
     }
     
-    console.error(`[zsxq] topic ${topic.topic_id}: downloaded ${downloadedFiles.length}/${files.length} files, ${downloadedImages.length}/${images.length} images`);
+    info(`topic ${topic.topic_id}: downloaded ${downloadedFiles.length}/${files.length} files, ${downloadedImages.length}/${images.length} images`);
 
     // 生成帖子的 Markdown 内容并立即追加到当前文件
     const topicMd = buildTopicMarkdownBlock(topic, downloadedFiles, downloadedImages, fileErrors, imageErrors, outputDir);
@@ -1108,8 +1147,8 @@ async function exportTopicsToMarkdown() {
     await fetchAndProcessTopicsByCount(groupId, count, scope, processTopic);
   }
 
-  console.error(`[zsxq] completed file ${currentFileIndex} with ${topicsInCurrentFile} topics`);
-  console.error(`[zsxq] total files created: ${currentFileIndex}`);
+  info(`completed file ${currentFileIndex} with ${topicsInCurrentFile} topics`);
+  info(`total files created: ${currentFileIndex}`);
 
   console.log(JSON.stringify({
     group_id: groupId,
@@ -1134,7 +1173,7 @@ async function fetchAndProcessTopicsByCount(groupId, count, scope, processCallba
     ? `${BASE_URL}/groups/${groupId}/topics?scope=digests&count=20`
     : `${BASE_URL}/groups/${groupId}/topics?scope=all&count=20`;
 
-  console.error(`[zsxq] fetching ${isDigests ? 'digests' : 'all'} topics for group ${groupId} (count=${limitedCount})...`);
+  info(`fetching ${isDigests ? 'digests' : 'all'} topics for group ${groupId} (count=${limitedCount})...`);
 
   let processedCount = 0;
   let url = endpoint;
@@ -1148,31 +1187,31 @@ async function fetchAndProcessTopicsByCount(groupId, count, scope, processCallba
     try {
       res = await httpGetWithRetry(url);
     } catch (err) {
-      console.error(`[zsxq] fetch error: ${err.message}`);
+      info(`fetch error: ${err.message}`);
       break;
     }
 
     if (res.statusCode !== 200) {
-      console.error(`[zsxq] HTTP ${res.statusCode}: ${res.body.substring(0, 300)}`);
+      info(`HTTP ${res.statusCode}: ${res.body.substring(0, 300)}`);
       break;
     }
 
     const data = safeJsonParse(res.body);
     if (!data) {
-      console.error(`[zsxq] non-JSON response: ${res.body.substring(0, 300)}`);
+      info(`non-JSON response: ${res.body.substring(0, 300)}`);
       break;
     }
 
     if (!data.succeeded) {
       retryCount++;
       if (retryCount > maxRetries) {
-        console.error(`[zsxq] API error after ${maxRetries} retries: ${JSON.stringify(data)}`);
+        info(`API error after ${maxRetries} retries: ${JSON.stringify(data)}`);
         break;
       }
-      console.error(`[zsxq] API error (retry ${retryCount}/${maxRetries}): ${JSON.stringify(data)}`);
-      console.error(`[zsxq] ===== RETRYING SAME REQUEST =====`);
-      console.error(`[zsxq] retry URL: ${url}`);
-      console.error(`[zsxq] ===================================`);
+      info(`API error (retry ${retryCount}/${maxRetries}): ${JSON.stringify(data)}`);
+      info(`===== RETRYING SAME REQUEST =====`);
+      info(`retry URL: ${url}`);
+      info(`===================================`);
       
       await sleep(2000); // 等待2秒后重试
       continue;
@@ -1183,7 +1222,7 @@ async function fetchAndProcessTopicsByCount(groupId, count, scope, processCallba
 
     const topics = data.resp_data && data.resp_data.topics;
     if (!Array.isArray(topics) || topics.length === 0) {
-      console.error('[zsxq] no more topics');
+      info('no more topics');
       break;
     }
 
@@ -1216,17 +1255,17 @@ async function fetchAndProcessTopicsByCount(groupId, count, scope, processCallba
       if (processedCount >= limitedCount) break;
     }
 
-    console.error(`[zsxq] processed ${processedCount}/${limitedCount} topics`);
+    info(`processed ${processedCount}/${limitedCount} topics`);
 
     const lastTopic = topics[topics.length - 1];
     if (lastTopic && lastTopic.create_time && processedCount < limitedCount) {
       const endTime = encodeURIComponent(lastTopic.create_time);
       url = `${endpoint}&end_time=${endTime}`;
-      console.error(`[zsxq] ===== PAGINATION DEBUG =====`);
-      console.error(`[zsxq] raw create_time: ${lastTopic.create_time}`);
-      console.error(`[zsxq] encoded end_time: ${endTime}`);
-      console.error(`[zsxq] full URL: ${url}`);
-      console.error(`[zsxq] ============================`);
+      info(`===== PAGINATION DEBUG =====`);
+      info(`raw create_time: ${lastTopic.create_time}`);
+      info(`encoded end_time: ${endTime}`);
+      info(`full URL: ${url}`);
+      info(`============================`);
       pages += 1;
       await randomSleep();
       continue;
@@ -1243,7 +1282,7 @@ async function fetchAndProcessTopicsByDate(groupId, targetDateStr, scope, proces
     ? `${BASE_URL}/groups/${groupId}/topics?scope=digests&count=20`
     : `${BASE_URL}/groups/${groupId}/topics?scope=all&count=20`;
 
-  console.error(`[zsxq] fetching ${isDigests ? 'digests' : 'all'} topics for date ${targetDateStr}...`);
+  info(`fetching ${isDigests ? 'digests' : 'all'} topics for date ${targetDateStr}...`);
 
   const targetDate = new Date(targetDateStr);
   const targetDateOnly = targetDate.toISOString().split('T')[0]; // YYYY-MM-DD
@@ -1259,12 +1298,12 @@ async function fetchAndProcessTopicsByDate(groupId, targetDateStr, scope, proces
     try {
       res = await httpGetWithRetry(url);
     } catch (err) {
-      console.error(`[zsxq] fetch error: ${err.message}`);
+      info(`fetch error: ${err.message}`);
       break;
     }
 
     if (res.statusCode !== 200) {
-      console.error(`[zsxq] HTTP ${res.statusCode}: ${res.body.substring(0, 300)}`);
+      info(`HTTP ${res.statusCode}: ${res.body.substring(0, 300)}`);
       break;
     }
 
@@ -1273,13 +1312,13 @@ async function fetchAndProcessTopicsByDate(groupId, targetDateStr, scope, proces
     if (!data.succeeded) {
       retryCount++;
       if (retryCount > maxRetries) {
-        console.error(`[zsxq] API error after ${maxRetries} retries: ${JSON.stringify(data)}`);
+        info(`API error after ${maxRetries} retries: ${JSON.stringify(data)}`);
         break;
       }
-      console.error(`[zsxq] API error (retry ${retryCount}/${maxRetries}): ${JSON.stringify(data)}`);
-      console.error(`[zsxq] ===== RETRYING SAME REQUEST =====`);
-      console.error(`[zsxq] retry URL: ${url}`);
-      console.error(`[zsxq] ===================================`);
+      info(`API error (retry ${retryCount}/${maxRetries}): ${JSON.stringify(data)}`);
+      info(`===== RETRYING SAME REQUEST =====`);
+      info(`retry URL: ${url}`);
+      info(`===================================`);
       
       await sleep(2000); // 等待2秒后重试
       continue;
@@ -1290,7 +1329,7 @@ async function fetchAndProcessTopicsByDate(groupId, targetDateStr, scope, proces
 
     const topics = data.resp_data && data.resp_data.topics;
     if (!Array.isArray(topics) || topics.length === 0) {
-      console.error('[zsxq] no more topics');
+      info('no more topics');
       break;
     }
 
@@ -1335,10 +1374,10 @@ async function fetchAndProcessTopicsByDate(groupId, targetDateStr, scope, proces
       }
     }
 
-    console.error(`[zsxq] page ${pages + 1}: processed ${processedCount} topics for ${targetDateOnly}`);
+    info(`page ${pages + 1}: processed ${processedCount} topics for ${targetDateOnly}`);
 
     if (foundOlderThanTarget) {
-      console.error(`[zsxq] reached topics older than ${targetDateOnly}, stopping`);
+      info(`reached topics older than ${targetDateOnly}, stopping`);
       break;
     }
 
@@ -1346,11 +1385,11 @@ async function fetchAndProcessTopicsByDate(groupId, targetDateStr, scope, proces
     if (lastTopic && lastTopic.create_time) {
       const endTime = encodeURIComponent(lastTopic.create_time);
       url = `${endpoint}&end_time=${endTime}`;
-      console.error(`[zsxq] ===== PAGINATION DEBUG =====`);
-      console.error(`[zsxq] raw create_time: ${lastTopic.create_time}`);
-      console.error(`[zsxq] encoded end_time: ${endTime}`);
-      console.error(`[zsxq] full URL: ${url}`);
-      console.error(`[zsxq] ============================`);
+      info(`===== PAGINATION DEBUG =====`);
+      info(`raw create_time: ${lastTopic.create_time}`);
+      info(`encoded end_time: ${endTime}`);
+      info(`full URL: ${url}`);
+      info(`============================`);
       pages += 1;
       await randomSleep();
       continue;
@@ -1362,7 +1401,7 @@ async function fetchAndProcessTopicsByDate(groupId, targetDateStr, scope, proces
 
 // ── groups ───────────────────────────────────────────────────
 async function fetchGroups() {
-  console.error('[zsxq] fetching joined groups...');
+  info('fetching joined groups...');
 
   try {
     const res = await httpGetWithRetry(`${BASE_URL}/groups`);
@@ -1393,7 +1432,7 @@ async function fetchGroups() {
       owner: g.owner ? { user_id: String(g.owner.user_id), name: g.owner.name } : null,
     }));
 
-    console.error(`[zsxq] found ${result.length} groups`);
+    info(`found ${result.length} groups`);
     console.log(JSON.stringify({ groups: result }, null, 2));
   } catch (err) {
     console.log(JSON.stringify({ error: err.message }));
@@ -1423,11 +1462,13 @@ async function fetchGroups() {
         await fetchGroups();
         break;
       default:
-        console.error(`Unknown subcommand: ${subcommand}. Use: topics, digests, download-pdf, download-docx, export-md, groups`);
+        const errorMsg = `Unknown subcommand: ${subcommand}. Use: topics, digests, download-pdf, download-docx, export-md, groups`;
+        console.error(errorMsg);
+        error(errorMsg);
         process.exit(1);
     }
   } catch (err) {
-    console.error(`[zsxq] fatal error: ${err.message}`);
+    info(`fatal error: ${err.message}`);
     process.exit(1);
   }
 })();
