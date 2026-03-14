@@ -3,7 +3,6 @@
     "group_id": "YOUR_GROUP_ID",
     "name": "你的星球名称",
     "note": "投资分析",
-    "scope": "digests",
-    "max_topics": 20
+    "scope": "digests"
   }
 ]

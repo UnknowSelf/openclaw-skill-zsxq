@@ -55,8 +55,7 @@ ZSXQ_TOKEN=你的token值
     "group_id": "YOUR_GROUP_ID",
     "name": "你的星球名称",
     "note": "投资分析",
-    "scope": "digests",
-    "max_topics": 20
+    "scope": "digests"
   }
 ]
 ```
@@ -67,7 +66,6 @@ ZSXQ_TOKEN=你的token值
 | `name` | 星球名称（用于报告展示） |
 | `note` | 标签，标注星球侧重方向 |
 | `scope` | `digests`（仅精华）或 `all`（全部），推荐 `digests` |
-| `max_topics` | 每个星球最多抓取帖子数 |
 
 不确定 group_id？运行 `groups` 子命令查看已加入的星球：
 
@@ -79,7 +77,7 @@ ZSXQ_TOKEN=xxx node fetch_topics.js groups
 
 在 OpenClaw 中直接对话即可触发：
 
-### 按日期汇总（推荐）
+### 按日期汇总
 
 > 帮我汇总今天知识星球的内容
 
@@ -90,7 +88,7 @@ ZSXQ_TOKEN=xxx node fetch_topics.js groups
 Skill 会自动执行：
 1. 使用 `export-md` 命令按日期导出帖子
 2. 下载所有附件（PDF、图片、音频等）到本地
-3. 解析 Markdown 文件和 PDF 附件
+3. 解析 Markdown 文件和 PDF/DOCX 附件
 4. 生成完整的分析报告
 
 **优势**：
@@ -99,38 +97,13 @@ Skill 会自动执行：
 - 附件按日期归档在 `archive/asset/MM-DD/`
 - 每100个帖子自动分文件，便于管理
 
-### 快速浏览最新内容
-
-> 帮我汇总一下知识星球最新的内容
-
-> 看看最近20条帖子
-
-Skill 会自动执行：
-1. 使用 API 快速抓取最新帖子
-2. 在线解析 PDF 附件
-3. 生成分析报告
-
-**优势**：速度快，适合快速浏览
-
 ## 子命令参考
 
 `fetch_topics.js` 提供以下子命令，可独立使用：
 
 ```bash
-# 获取帖子（scope: all | digests）
-node fetch_topics.js topics <group_id> [count] [scope]
-
-# 获取精华帖（快捷方式）
-node fetch_topics.js digests <group_id> [count]
-
-# 下载并解析 PDF 附件
-node fetch_topics.js download-pdf <file_id>
-
-# 下载并解析 DOCX 附件
-node fetch_topics.js download-docx <file_id>
-
-# 导出帖子到 Markdown，并下载附件（支持按数量或按日期导出）
-node fetch_topics.js export-md <group_id> <count|YYYY-MM-DD> [scope] [output_dir]
+# 导出帖子到 Markdown，并下载附件（按日期导出）
+node fetch_topics.js export-md <group_id> <YYYY-MM-DD> [scope] [output_dir]
 
 # 列出已加入的星球
 node fetch_topics.js groups
@@ -138,13 +111,12 @@ node fetch_topics.js groups
 
 ### 导出 Markdown 说明
 
-`export-md` 命令支持两种导出模式，并具有以下特性：
+`export-md` 命令支持按日期导出，并具有以下特性：
 
 **导出模式**：
-- **按数量导出**：导出指定数量的最新帖子
 - **按日期导出**：导出指定日期的所有帖子
 
-**新特性**：
+**特性**：
 - 每100个帖子（5页）自动生成一个新的MD文件
 - 附件按日期分目录存储在 `asset/MM-DD/`
 - 支持最多3次重试机制（分页请求和下载请求）
@@ -153,21 +125,20 @@ node fetch_topics.js groups
 **命令格式**：
 
 ```bash
-node fetch_topics.js export-md <group_id> <count|YYYY-MM-DD> [scope] [output_dir]
+node fetch_topics.js export-md <group_id> <YYYY-MM-DD> [scope] [output_dir]
 ```
 
 **文件命名规则**：
-- 按数量导出：`MM-DD-HH-mm-ss-0x.md`（如 `03-01-14-30-45-01.md`）
-- 按日期导出：`MM-DD-0x.md`（如 `03-01-01.md`）
+- 按日期导出：`MM-DD-0x.md`（如 `03-14-01.md`）
 
 **目录结构**：
 
 ```
 archive/
-├── 03-01-01.md                    # 第1个文件（1-100个帖子）
-├── 03-01-02.md                    # 第2个文件（101-160个帖子）
+├── 03-14-01.md                    # 第1个文件（1-100个帖子）
+├── 03-14-02.md                    # 第2个文件（101-160个帖子）
 └── asset/
-    └── 03-01/                     # 按日期分目录
+    └── 03-14/                     # 按日期分目录
         ├── image_xxx.png
         ├── xxx.pdf
         └── ...
@@ -176,14 +147,14 @@ archive/
 **使用示例**：
 
 ```bash
-# 按数量导出：导出最新 30 条精华帖
-ZSXQ_TOKEN=xxx node fetch_topics.js export-md 51122188845424 30 digests
+# 按日期导出：导出 2026-03-14 的所有帖子
+ZSXQ_TOKEN=xxx node fetch_topics.js export-md 51122188845424 2026-03-14 all
 
-# 按日期导出：导出 2026-03-01 的所有帖子
-ZSXQ_TOKEN=xxx node fetch_topics.js export-md 51122188845424 2026-03-01 all
+# 导出精华帖
+ZSXQ_TOKEN=xxx node fetch_topics.js export-md 51122188845424 2026-03-14 digests
 
 # 自定义输出目录
-ZSXQ_TOKEN=xxx node fetch_topics.js export-md 51122188845424 150 all ./my-export
+ZSXQ_TOKEN=xxx node fetch_topics.js export-md 51122188845424 2026-03-14 all ./my-export
 ```
 
 **重要说明**：

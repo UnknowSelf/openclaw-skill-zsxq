@@ -86,124 +86,30 @@ cd {baseDir} && npm install
     "group_id": "YOUR_GROUP_ID",
     "name": "星球名称",
     "note": "投资分析",
-    "scope": "digests",
-    "max_topics": 20
+    "scope": "digests"
   }
 ]
 ```
 
 - `group_id`: 从星球 URL `wx.zsxq.com/group/{group_id}` 获取
 - `scope`: `digests`（仅精华）| `all`（全部），推荐 `digests`
-- `max_topics`: 每个星球最多抓取的帖子数
 - `note`: 标签，用于报告中标注星球侧重方向
 
 ---
 
 ## 数据抓取脚本
 
-`{baseDir}/fetch_topics.js` 提供六个子命令：
+`{baseDir}/fetch_topics.js` 提供两个核心子命令：
 
-### 1. 获取帖子
-
-```bash
-node {baseDir}/fetch_topics.js topics <group_id> [count] [scope]
-```
-
-- scope: `all`（全部）| `digests`（精华），默认 `all`
-- count: 帖子数，默认 20
-- 请求间隔 1 秒（翻页限速）
-- 帖子正文截取前 2000 字
-
-**输出格式（stdout）：**
-```json
-{
-  "group_id": "YOUR_GROUP_ID",
-  "scope": "digests",
-  "count": 5,
-  "topics": [
-    {
-      "topic_id": "123456",
-      "type": "talk",
-      "title": "",
-      "text": "帖子内容...",
-      "create_time": "2026-02-20T10:30:00.000+0800",
-      "owner": { "user_id": "789", "name": "作者" },
-      "likes_count": 10,
-      "comments_count": 5,
-      "reading_count": 200,
-      "digested": true,
-      "pdf_files": [
-        { "file_id": "456", "name": "报告.pdf", "size": 1024000 }
-      ],
-      "image_count": 2
-    }
-  ]
-}
-```
-
-帖子链接：`https://wx.zsxq.com/topic/{topic_id}`
-
-### 2. 获取精华帖（快捷方式）
+### 1. 导出帖子到 Markdown（按日期导出）
 
 ```bash
-node {baseDir}/fetch_topics.js digests <group_id> [count]
+node {baseDir}/fetch_topics.js export-md <group_id> <YYYY-MM-DD> [scope] [output_dir]
 ```
 
-等价于 `topics <group_id> [count] digests`。
-
-### 3. 下载并解析 PDF
-
-```bash
-node {baseDir}/fetch_topics.js download-pdf <file_id>
-```
-
-- 先获取下载 URL，再下载 PDF 二进制，再用 pdf-parse 提取文本
-- 文本截取上限 10000 字符
-- 扫描件 PDF 无法提取文本，会返回 `pdf_parse_failed` 错误
-
-**输出格式（stdout）：**
-```json
-{
-  "file_id": "456",
-  "pages": 12,
-  "size_kb": 1024,
-  "text_length": 8500,
-  "truncated": false,
-  "text": "PDF 全文内容..."
-}
-```
-
-### 4. 下载并解析 DOCX
-
-```bash
-node {baseDir}/fetch_topics.js download-docx <file_id>
-```
-
-- 先获取下载 URL，再下载 DOCX 二进制，再用 mammoth 提取文本
-- 文本截取上限 10000 字符
-- 无法提取文本时，会返回 `docx_parse_failed` 错误
-
-**输出格式（stdout）：**
-```json
-{
-  "file_id": "456",
-  "size_kb": 512,
-  "text_length": 6500,
-  "truncated": false,
-  "text": "DOCX 全文内容..."
-}
-```
-
-### 5. 导出帖子到 Markdown（推荐用于按日期汇总）
-
-```bash
-node {baseDir}/fetch_topics.js export-md <group_id> <count|YYYY-MM-DD> [scope] [output_dir]
-```
-
-**新功能**：支持按日期导出，自动下载所有附件（PDF、DOCX、图片、音频等）到本地。
+支持按日期导出，自动下载所有附件（PDF、DOCX、图片、音频等）到本地。
 
 - **按日期导出**：`export-md <group_id> 2026-03-01 all` - 导出指定日期的所有帖子
-- **按数量导出**：`export-md <group_id> 30 digests` - 导出最新 30 条精华帖
 - scope: `all`（全部）| `digests`（精华），默认 `all`
 - output_dir: 输出目录，默认 `{baseDir}/archive`
 
@@ -215,7 +121,6 @@ node {baseDir}/fetch_topics.js export-md <group_id> <count|YYYY-MM-DD> [scope] [
 
 **输出文件**：
 - 按日期导出：`archive/03-01-01.md`, `archive/03-01-02.md`, ...
-- 按数量导出：`archive/03-01-14-30-45-01.md`, ...
 - 附件目录：`archive/asset/03-01/`
 
 **输出格式（stdout）：**
@@ -235,7 +140,7 @@ node {baseDir}/fetch_topics.js export-md <group_id> <count|YYYY-MM-DD> [scope] [
 }
 ```
 
-### 6. 列出已加入的星球
+### 2. 列出已加入的星球
 
 ```bash
 node {baseDir}/fetch_topics.js groups
@@ -247,35 +152,19 @@ node {baseDir}/fetch_topics.js groups
 
 ## 执行流程
 
-### 模式选择
-
-根据用户请求，选择合适的执行模式：
-
-**模式 A：按日期导出模式（推荐）**
-- 触发词：用户提到"今天"、"昨天"、"前天"、具体日期（如"3月1日"、"2026-03-01"）
-- 适用场景：需要完整下载附件、生成本地归档、分析特定日期的内容
-- 优势：自动下载所有附件（PDF、图片等）、支持离线查看、附件按日期归档
-
-**模式 B：传统 API 模式**
-- 触发词：用户提到"最新"、"最近N条"、未指定具体日期
-- 适用场景：快速获取最新内容、不需要下载附件
-- 优势：速度快、适合快速浏览
-
 ### 日期解析规则
 
 当用户使用相对日期时，需要转换为 YYYY-MM-DD 格式：
 
-- "今天" → 当前日期（如 2026-03-01）
-- "昨天" → 当前日期减1天（如 2026-02-28）
-- "前天" → 当前日期减2天（如 2026-02-27）
+- "今天" → 当前日期（如 2026-03-14）
+- "昨天" → 当前日期减1天（如 2026-03-13）
+- "前天" → 当前日期减2天（如 2026-03-12）
 - "3月1日" → 当前年份-03-01（如 2026-03-01）
 - "2026-03-01" → 直接使用
 
 **重要**：始终使用 YYYY-MM-DD 格式调用 export-md 命令。
 
-### 模式 A：按日期导出模式（export-md）
-
-**适用场景**：用户说"帮我汇总今天知识星球的内容"、"分析一下昨天的帖子"等
+### 按日期导出模式
 
 #### 步骤 1：检查环境
 
@@ -284,6 +173,7 @@ node {baseDir}/fetch_topics.js groups
 - 确定目标日期（今天、昨天或用户指定的日期）
 
 #### 步骤 2：导出帖子和附件
+**重要**： node命令的超时时间为20分钟
 
 对 groups.json 中每个星球，执行：
 
@@ -291,19 +181,19 @@ node {baseDir}/fetch_topics.js groups
 node {baseDir}/fetch_topics.js export-md <group_id> <YYYY-MM-DD> <scope> {baseDir}/archive
 ```
 
-例如导出今天（2026-03-01）的内容：
+例如导出今天（2026-03-14）的内容：
 ```bash
-node {baseDir}/fetch_topics.js export-md 51122188845424 2026-03-01 all {baseDir}/archive
+node {baseDir}/fetch_topics.js export-md 51122188845424 2026-03-14 all {baseDir}/archive
 ```
 
 **输出**：
-- Markdown 文件：`{baseDir}/archive/03-01-01.md`, `03-01-02.md`, ...
-- 附件目录：`{baseDir}/archive/asset/03-01/`
+- Markdown 文件：`{baseDir}/archive/03-14-01.md`, `03-14-02.md`, ...
+- 附件目录：`{baseDir}/archive/asset/03-14/`
 - 包含所有 PDF、图片、音频等附件
 
 如果有多个星球，依次导出，间隔 2 秒。
-导出完成后再进行下一步，禁止提前进入下一步处理
-如果20分钟仍然没有导出完成，终止导出进程并进入下一步并在结果中说明，禁止提前主动终止导出进程
+**重要**：导出完成后再进行下一步，禁止提前进入下一步处理
+**重要**：如果20分钟仍然没有导出完成，终止导出进程并进入下一步并在结果中说明，禁止提前主动终止导出进程
 
 #### 步骤 3：读取导出的 Markdown 文件
 
@@ -311,12 +201,12 @@ node {baseDir}/fetch_topics.js export-md 51122188845424 2026-03-01 all {baseDir}
 
 ```bash
 # 读取所有生成的 MD 文件
-cat {baseDir}/archive/03-01-*.md
+cat {baseDir}/archive/03-14-*.md
 ```
 
 Markdown 文件已包含：
 - 帖子完整内容
-- 附件链接（相对路径，如 `asset/03-01/xxx.pdf`）
+- 附件链接（相对路径，如 `asset/03-14/xxx.pdf`）
 - 帖子元数据（时间、ID、类型等）
 
 **从 Markdown 中提取文档文件列表**：
@@ -326,7 +216,16 @@ Markdown 文件已包含：
 
 #### 步骤 4：解析文档附件（PDF 和 DOCX）
 
-使用步骤 3 提取的文档文件列表，逐个解析本地文件。
+**重要**：解析{baseDir}/archive/asset/MM-DD/ 下所有的pdf和docx附件，不能遗漏
+**文本提取**：
+- 对每个文档文件，根据扩展名选择对应的解析器（pdf-parse 或 mammoth）
+- 尝试提取文本
+- 如果提取失败或文本为空，标注为"扫描件，无法提取文本"
+- 文本截取上限 100000 字符
+
+**去重处理**：
+- 检测相同或相似的研报标题
+- 合并重复内容，只保留一份
 
 **解析 PDF 文件**：
 ```javascript
@@ -334,7 +233,7 @@ const fs = require('fs');
 const pdfParse = require('pdf-parse');
 
 // 从 Markdown 中提取的 PDF 路径
-const pdfPath = '{baseDir}/archive/asset/03-01/报告.pdf';
+const pdfPath = '{baseDir}/archive/asset/03-14/报告.pdf';
 
 const pdfBuffer = fs.readFileSync(pdfPath);
 const pdfData = await pdfParse(pdfBuffer);
@@ -343,7 +242,7 @@ console.log(JSON.stringify({
   file_type: 'pdf',
   pages: pdfData.numpages,
   text_length: pdfData.text.length,
-  text: pdfData.text.substring(0, 10000) // 截取前10000字符
+  text: pdfData.text.substring(0, 100000) // 截取前10000字符
 }));
 ```
 
@@ -353,7 +252,7 @@ const fs = require('fs');
 const mammoth = require('mammoth');
 
 // 从 Markdown 中提取的 DOCX 路径
-const docxPath = '{baseDir}/archive/asset/03-01/报告.docx';
+const docxPath = '{baseDir}/archive/asset/03-14/报告.docx';
 
 const docxBuffer = fs.readFileSync(docxPath);
 const result = await mammoth.extractRawText({ buffer: docxBuffer });
@@ -361,75 +260,12 @@ console.log(JSON.stringify({
   file_path: docxPath,
   file_type: 'docx',
   text_length: result.value.length,
-  text: result.value.substring(0, 10000) // 截取前10000字符
+  text: result.value.substring(0, 100000) // 截取前10000字符
 }));
 ```
 
-
-**文本提取**：
-- 对每个文档文件，根据扩展名选择对应的解析器（pdf-parse 或 mammoth）
-- 尝试提取文本
-- 如果提取失败或文本为空，标注为"扫描件，无法提取文本"
-- 文本截取上限 10000 字符
-- PDF 之间无需间隔（本地文件读取）
-
-**去重处理**：
-- 检测相同或相似的研报标题
-- 合并重复内容，只保留一份
-
-
-**优势**：
-- 所有附件已下载到本地，无需担心 URL 过期
-- 可以离线分析
-- 附件按日期归档，便于后续查阅
-
 #### 步骤 5：汇总分析
 结合 Markdown 文件内容和文档附件文本，按报告格式输出。
-
----
-
-### 模式 B：传统 API 模式（topics + download-pdf）
-
-**适用场景**：用户说"帮我汇总最新的知识星球内容"、"看看最近20条帖子"等
-
-#### 步骤 1：检查环境
-
-- 验证 `$ZSXQ_TOKEN` 已设置
-- 读取 `{baseDir}/groups.json`（星球配置）
-- 确定目标日期（今天、昨天或用户指定的日期）
-
-#### 步骤 2：抓取帖子
-
-对 groups.json 中每个星球，按配置执行：
-
-```bash
-node {baseDir}/fetch_topics.js topics <group_id> <max_topics> <scope>
-```
-
-如果有多个星球，依次抓取，间隔 1.5 秒。
-
-#### 步骤 3：解析文档附件（PDF 和 DOCX）
-
-扫描步骤 2 获得的帖子，收集所有 `pdf_files`和`docx_files`。
-对每个 PDF：
-
-```bash
-node {baseDir}/fetch_topics.js download-pdf <file_id>
-```
-
-PDF 之间间隔 1 秒。如果某个 PDF 解析失败，记录错误但继续处理其他 PDF。
-
-对每个docx：
-
-```bash
-node {baseDir}/fetch_topics.js download-docx <file_id>
-```
-
-**步骤 2 和步骤 3 必须顺序执行**（步骤 3 依赖步骤 2 的 pdf_files 和 docx_files 结果）。
-
-#### 步骤 4：汇总分析
-
-结合帖子内容和 PDF/docx 文本，按下方报告格式输出。
 
 ---
 
@@ -461,15 +297,8 @@ node {baseDir}/fetch_topics.js download-docx <file_id>
 
 **展示策略**：
 - 相似观点合并（如多个帖子都看好某板块，合并为一条）
-- 按重要性排序，最多展示50条核心观点
-
-按星球分组，每个星球包含：
-
-- **星球名称**（标签来自 groups.json 的 note 字段）
-- 每条帖子提炼 1-2 句核心投资观点
+- 将帖子汇总后，按重要性排序，最多展示50条核心观点
 - 标注帖子提及的具体**股票代码**或**板块方向**
-- 如有文档附件，标注 `📎 附件: xxx.pdf` 或 `📎 附件: xxx.docx`
-- 互动数据（阅读/点赞/评论）
 
 ### 二、文档附件研报精华提炼
 
