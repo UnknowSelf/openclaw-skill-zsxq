@@ -1,6 +1,7 @@
 .vscode
 archive/
 node_modules/
-groups.json
 package-lock.json
 .env
+groups.json
+log

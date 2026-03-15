@@ -99,7 +99,7 @@ cd {baseDir} && npm install
 
 ## 数据抓取脚本
 
-`{baseDir}/fetch_topics.js` 提供两个核心子命令：
+`{baseDir}/fetch_topics.js` 提供三个核心子命令：
 
 ### 1. 导出帖子到 Markdown（按日期导出）
 
@@ -114,14 +114,15 @@ node {baseDir}/fetch_topics.js export-md <group_id> <YYYY-MM-DD> [scope] [output
 - output_dir: 输出目录，默认 `{baseDir}/archive`
 
 **特性**：
-- 每100个帖子（5页）自动生成一个新的MD文件
+- 自动分离图文帖子和附件帖子到不同文件
 - 附件按日期分目录存储在 `archive/asset/MM-DD/`
 - 支持最多3次重试机制（分页请求和下载请求）
 - 流式处理：边获取边下载边写入，防止URL过期
 
 **输出文件**：
-- 按日期导出：`archive/03-01-01.md`, `archive/03-01-02.md`, ...
-- 附件目录：`archive/asset/03-01/`
+- 图文帖子：`archive/MM-DD-txtimg.md`（只包含文本和图片的帖子）
+- 附件帖子：`archive/MM-DD-attachment.md`（包含文档附件的帖子）
+- 附件目录：`archive/asset/MM-DD/`
 
 **输出格式（stdout）：**
 ```json
@@ -129,8 +130,11 @@ node {baseDir}/fetch_topics.js export-md <group_id> <YYYY-MM-DD> [scope] [output
   "group_id": "51122188845424",
   "scope": "all",
   "export_mode": "date (2026-03-01)",
-  "topics_count": 150,
-  "files_count": 2,
+  "txtimg_count": 120,
+  "attachment_count": 30,
+  "total_count": 150,
+  "txtimg_file": "/path/to/archive/03-01-txtimg.md",
+  "attachment_file": "/path/to/archive/03-01-attachment.md",
   "output_dir": "/path/to/archive",
   "attachments_dir": "/path/to/archive/asset/03-01",
   "files_downloaded": 45,
@@ -140,7 +144,61 @@ node {baseDir}/fetch_topics.js export-md <group_id> <YYYY-MM-DD> [scope] [output
 }
 ```
 
-### 2. 列出已加入的星球
+### 2. 解析文档文件（PDF 和 DOCX）
+
+```bash
+node {baseDir}/fetch_topics.js parse-doc <doc_dir> [output_dir]
+```
+
+解析指定目录下的所有 PDF 和 DOCX 文件，提取文本内容并保存到 Markdown 文件。
+
+- doc_dir: 文档文件所在目录（支持递归扫描子目录）
+- output_dir: 输出目录，默认 `{baseDir}/archive`
+
+**特性**：
+- 递归扫描目录下所有 PDF 和 DOCX 文件
+- 自动跳过图片型文档（文本长度 < 50 字符）
+- 以文件名为标题，不同文档之间用 `---` 分隔
+- 输出文件名：`MM-DD-doc.md`
+- 分别统计 PDF 和 DOCX 的解析情况
+
+**输出格式（stdout）：**
+```json
+{
+  "source_dir": "/path/to/doc/dir",
+  "output_file": "/path/to/archive/03-15-doc.md",
+  "total_files": 34,
+  "parsed_count": 34,
+  "skipped_count": 0,
+  "failed_count": 0,
+  "stats": {
+    "pdf": {
+      "total": 2,
+      "parsed": 2,
+      "skipped": 0,
+      "failed": 0
+    },
+    "docx": {
+      "total": 32,
+      "parsed": 32,
+      "skipped": 0,
+      "failed": 0
+    }
+  },
+  "failures": []
+}
+```
+
+**使用示例**：
+```bash
+# 解析 archive/asset/03-15 目录下的所有 PDF 和 DOCX
+node {baseDir}/fetch_topics.js parse-doc archive/asset/03-15
+
+# 指定输出目录
+node {baseDir}/fetch_topics.js parse-doc archive/asset/03-15 output
+```
+
+### 3. 列出已加入的星球
 
 ```bash
 node {baseDir}/fetch_topics.js groups
@@ -181,15 +239,19 @@ node {baseDir}/fetch_topics.js groups
 node {baseDir}/fetch_topics.js export-md <group_id> <YYYY-MM-DD> <scope> {baseDir}/archive
 ```
 
-例如导出今天（2026-03-14）的内容：
+例如导出今天（2026-03-15）的内容：
 ```bash
-node {baseDir}/fetch_topics.js export-md 51122188845424 2026-03-14 all {baseDir}/archive
+node {baseDir}/fetch_topics.js export-md 51122188845424 2026-03-15 all {baseDir}/archive
 ```
 
 **输出**：
-- Markdown 文件：`{baseDir}/archive/03-14-01.md`, `03-14-02.md`, ...
-- 附件目录：`{baseDir}/archive/asset/03-14/`
-- 包含所有 PDF、图片、音频等附件
+- 图文帖子文件：`{baseDir}/archive/03-15-txtimg.md`（只包含文本和图片的帖子，用于分析）
+- 附件帖子文件：`{baseDir}/archive/03-15-attachment.md`（包含文档附件的帖子，仅作记录）
+- 附件目录：`{baseDir}/archive/asset/03-15/`（包含所有 PDF、DOCX、图片等附件）
+
+**文件分类说明**：
+- 图文帖子（txtimg）：只包含文本和图片，没有文档附件，用于提取核心观点
+- 附件帖子（attachment）：包含 PDF、DOCX 等文档附件的帖子，仅作记录（文档内容通过 parse-doc 命令单独解析）
 
 如果有多个星球，依次导出，间隔 2 秒。
 **重要**：导出完成后再进行下一步，禁止提前进入下一步处理
@@ -197,75 +259,124 @@ node {baseDir}/fetch_topics.js export-md 51122188845424 2026-03-14 all {baseDir}
 
 #### 步骤 3：读取导出的 Markdown 文件
 
-读取步骤 2 生成的所有 Markdown 文件内容：
+读取步骤 2 生成的图文帖子文件：
 
 ```bash
-# 读取所有生成的 MD 文件
-cat {baseDir}/archive/03-14-*.md
+# 读取图文帖子文件（用于分析）
+cat {baseDir}/archive/03-15-txtimg.md
 ```
 
+**说明**：
+- 图文帖子文件（txtimg.md）：包含所有文本和图片内容，用于提取核心观点
+- 附件帖子文件（attachment.md）：仅作记录，不需要读取（后续直接读取解析后的文档内容）
+
 Markdown 文件已包含：
-- 帖子完整内容
-- 附件链接（相对路径，如 `asset/03-14/xxx.pdf`）
+- 帖子完整内容（已优化格式，防止 Markdown 误识别）
+- 图片链接（相对路径，如 `asset/03-15/xxx.png`）
 - 帖子元数据（时间、ID、类型等）
 
-**从 Markdown 中提取文档文件列表**：
-- 扫描 Markdown 中的附件链接
-- 识别所有 `.pdf` 和 `.docx` 结尾的文件路径
-- 构建完整的本地文件路径列表
+**格式优化说明**：
+- 数字列表已转义（`1、` → `\1、`），防止被误识别为 Markdown 列表
+- 分隔线已转义（`--` → `\--`），防止被误识别为标题下划线
+- 每行末尾添加了两个空格，确保正确换行显示
 
-#### 步骤 4：解析文档附件（PDF 和 DOCX）
+#### 步骤 4：解析文档附件
 
-**重要**：解析{baseDir}/archive/asset/MM-DD/ 下所有的pdf和docx附件，不能遗漏
-**文本提取**：
-- 对每个文档文件，根据扩展名选择对应的解析器（pdf-parse 或 mammoth）
-- 尝试提取文本
-- 如果提取失败或文本为空，标注为"扫描件，无法提取文本"
-- 文本截取上限 100000 字符
+**推荐方式：使用 parse-doc 命令**
+
+使用 `parse-doc` 命令一次性解析所有文档：
+
+```bash
+node {baseDir}/fetch_topics.js parse-doc {baseDir}/archive/asset/03-15 {baseDir}/archive
+```
+
+**输出**：
+- 文档解析结果文件：`{baseDir}/archive/03-15-doc.md`
+- 包含所有 PDF 和 DOCX 的文本内容
+- 以文件名为标题，不同文档之间用 `---` 分隔
+- 自动跳过图片型文档（文本长度 < 50 字符）
+
+**输出格式示例**：
+```markdown
+# 文档解析结果
+
+- source_dir: /path/to/archive/asset/03-15
+- parsed_at: 2026-03-15T09:36:52.777Z
+
+---
+## 报告1.pdf
+
+- 文件类型: PDF
+- 页数: 10
+- 文件大小: 1024 KB
+- 文本长度: 5000 字符
+
+[文档内容...]
+
+---
+## 报告2.docx
+
+- 文件类型: DOCX
+- 文件大小: 256 KB
+- 文本长度: 3000 字符
+
+[文档内容...]
+
+---
+```
+
+**命令输出（JSON）**：
+```json
+{
+  "source_dir": "/path/to/archive/asset/03-15",
+  "output_file": "/path/to/archive/03-15-doc.md",
+  "total_files": 34,
+  "parsed_count": 34,
+  "skipped_count": 0,
+  "failed_count": 0,
+  "stats": {
+    "pdf": {
+      "total": 2,
+      "parsed": 2,
+      "skipped": 0,
+      "failed": 0
+    },
+    "docx": {
+      "total": 32,
+      "parsed": 32,
+      "skipped": 0,
+      "failed": 0
+    }
+  },
+  "failures": []
+}
+```
+
+**读取解析结果**：
+```bash
+cat {baseDir}/archive/03-15-doc.md
+```
 
 **去重处理**：
 - 检测相同或相似的研报标题
 - 合并重复内容，只保留一份
 
-**解析 PDF 文件**：
-```javascript
-const fs = require('fs');
-const pdfParse = require('pdf-parse');
-
-// 从 Markdown 中提取的 PDF 路径
-const pdfPath = '{baseDir}/archive/asset/03-14/报告.pdf';
-
-const pdfBuffer = fs.readFileSync(pdfPath);
-const pdfData = await pdfParse(pdfBuffer);
-console.log(JSON.stringify({
-  file_path: pdfPath,
-  file_type: 'pdf',
-  pages: pdfData.numpages,
-  text_length: pdfData.text.length,
-  text: pdfData.text.substring(0, 100000) // 截取前10000字符
-}));
-```
-
-**解析 DOCX 文件**：
-```javascript
-const fs = require('fs');
-const mammoth = require('mammoth');
-
-// 从 Markdown 中提取的 DOCX 路径
-const docxPath = '{baseDir}/archive/asset/03-14/报告.docx';
-
-const docxBuffer = fs.readFileSync(docxPath);
-const result = await mammoth.extractRawText({ buffer: docxBuffer });
-console.log(JSON.stringify({
-  file_path: docxPath,
-  file_type: 'docx',
-  text_length: result.value.length,
-  text: result.value.substring(0, 100000) // 截取前10000字符
-}));
-```
 
 #### 步骤 5：汇总分析
-结合 Markdown 文件内容和文档附件文本，按报告格式输出。
+
+结合以下内容进行汇总分析：
+- **图文帖子内容**：`{baseDir}/archive/03-15-txtimg.md`（提取核心观点和投资建议）
+- **文档解析结果**：`{baseDir}/archive/03-15-doc.md`（提取研报精华和数据要点）
+
+**注意**：
+- 必须读取全文进行汇总
+- 附件帖子文件（`03-15-attachment.md`）仅作记录，不需要读取
+- 文档内容已通过 parse-doc 命令解析并保存在 `03-15-doc.md` 中
+
+** 按报告格式输出，重点关注： **
+- 图文帖子中的核心观点和投资建议
+- 文档附件中的研报精华和数据要点
+- 苹果和特斯拉相关内容的专门汇总同一板块，提取共识观点）
 
 ---
 
@@ -376,25 +487,40 @@ console.log(JSON.stringify({
 | 错误场景 | 检测方式 | 处理 |
 |---------|---------|------|
 | Token 未设置 | `$ZSXQ_TOKEN` 为空 | 提示用户设置并说明获取方法 |
-| pdf-parse 未安装 | node 报 MODULE_NOT_FOUND | 提示运行 `bash {baseDir}/install.sh` |
+| pdf-parse/mammoth 未安装 | node 报 MODULE_NOT_FOUND | 提示运行 `bash {baseDir}/install.sh` |
 | Token 过期 | HTTP 401 | 提示重新获取 token |
 | 未加入星球 | HTTP 403 | 提示用户需先加入该星球 |
 | API 限流 | HTTP 429 | 自动重试（指数退避 2s/4s/8s） |
 | 分页请求失败 | API 返回 succeeded=false | 自动重试最多3次（间隔2秒） |
-| PDF 下载失败 | 下载返回非 200 | 自动重试最多3次（指数退避），失败后跳过该 PDF |
-| PDF 为扫描件 | pdf-parse 返回空文本 | 报告中标注"扫描件，无法提取文本" |
+| 文档下载失败 | 下载返回非 200 | 自动重试最多3次（指数退避），失败后跳过该文档 |
+| 文档为扫描件 | parse-doc 跳过文本长度 < 50 | 在 skipped_count 中统计，不影响其他文档 |
 | 星球不存在 | API 返回 succeeded=false | 跳过该星球，报告中标注 |
 | 附件下载失败 | export-md 中部分附件失败 | 记录在 failures 数组，继续处理其他附件 |
-| 目标日期无帖子 | export-md 返回 topics_count=0 | 提示用户该日期没有帖子 |
+| 目标日期无帖子 | export-md 返回 total_count=0 | 提示用户该日期没有帖子 |
+| 文档解析失败 | parse-doc 返回 failed_count > 0 | 记录在 failures 数组，继续处理其他文档 |
 | 处理超时 | 超过30分钟 | 输出已处理部分的报告，标注进度 |
 
-**原则：部分失败不中断整体流程。** PDF 解析失败仍输出帖子摘要，单个星球失败仍处理其他星球，部分附件下载失败仍生成报告。
+**原则：部分失败不中断整体流程。** 文档解析失败仍输出帖子摘要，单个星球失败仍处理其他星球，部分附件下载失败仍生成报告。
 
 **日志记录**：所有错误和警告都会记录到 `{baseDir}/log/YYYYMMDD.log` 文件中，便于事后排查。
 
 ---
 
 ## 版本更新记录
+
+### v2.1.0 (2026-03-15)
+
+**新增功能**：
+- ✨ parse-doc 命令：一次性解析所有 PDF 和 DOCX 文件
+- ✨ 文件分类：自动分离图文帖子和附件帖子到不同文件
+- ✨ Markdown 格式优化：防止数字列表、分隔线被误识别
+- ✨ 硬换行支持：每行末尾添加两个空格，确保正确换行
+
+**优化改进**：
+- 🔧 输出文件命名：`MM-DD-txtimg.md`（图文）和 `MM-DD-attachment.md`（附件）
+- 🔧 文档解析结果：统一输出到 `MM-DD-doc.md`
+- 🔧 格式转义：数字列表（`1、` → `\1、`）、分隔线（`--` → `\--`）
+- 🔧 统计信息：分别统计 PDF 和 DOCX 的解析情况
 
 ### v2.0.0 (2026-03-14)
 

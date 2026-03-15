@@ -105,6 +105,9 @@ Skill 会自动执行：
 # 导出帖子到 Markdown，并下载附件（按日期导出）
 node fetch_topics.js export-md <group_id> <YYYY-MM-DD> [scope] [output_dir]
 
+# 解析文档文件（PDF 和 DOCX）
+node fetch_topics.js parse-doc <doc_dir> [output_dir]
+
 # 列出已加入的星球
 node fetch_topics.js groups
 ```
@@ -117,7 +120,7 @@ node fetch_topics.js groups
 - **按日期导出**：导出指定日期的所有帖子
 
 **特性**：
-- 每100个帖子（5页）自动生成一个新的MD文件
+- 自动分离图文帖子和附件帖子到不同文件
 - 附件按日期分目录存储在 `asset/MM-DD/`
 - 支持最多3次重试机制（分页请求和下载请求）
 - 流式处理：边获取边下载边写入，防止URL过期
@@ -129,14 +132,15 @@ node fetch_topics.js export-md <group_id> <YYYY-MM-DD> [scope] [output_dir]
 ```
 
 **文件命名规则**：
-- 按日期导出：`MM-DD-0x.md`（如 `03-14-01.md`）
+- 图文帖子：`MM-DD-txtimg.md`（只包含文本和图片的帖子）
+- 附件帖子：`MM-DD-attachment.md`（包含文档附件的帖子）
 
 **目录结构**：
 
 ```
 archive/
-├── 03-14-01.md                    # 第1个文件（1-100个帖子）
-├── 03-14-02.md                    # 第2个文件（101-160个帖子）
+├── 03-14-txtimg.md                # 图文帖子
+├── 03-14-attachment.md            # 附件帖子
 └── asset/
     └── 03-14/                     # 按日期分目录
         ├── image_xxx.png
@@ -158,11 +162,70 @@ ZSXQ_TOKEN=xxx node fetch_topics.js export-md 51122188845424 2026-03-14 all ./my
 ```
 
 **重要说明**：
-- 每100个帖子自动创建新文件，文件序号从 `01` 开始递增
+- 图文帖子和附件帖子分别独立计数
 - 同一天的所有附件存储在同一个日期目录下
 - 分页请求失败会自动重试最多3次（间隔2秒）
 - 下载请求失败会自动重试最多3次（指数退避：2秒、4秒、8秒）
 - 详细使用说明请参考 [EXPORT_USAGE.md](EXPORT_USAGE.md)
+
+### 解析文档文件说明
+
+`parse-doc` 命令用于解析指定目录下的所有 PDF 和 DOCX 文件，提取文本内容并保存到 Markdown 文件。
+
+**命令格式**：
+
+```bash
+node fetch_topics.js parse-doc <doc_dir> [output_dir]
+```
+
+**参数说明**：
+- `doc_dir`: 文档文件所在目录（支持递归扫描子目录）
+- `output_dir`: 输出目录，默认 `archive`
+
+**特性**：
+- 递归扫描目录下所有 PDF 和 DOCX 文件
+- 自动跳过图片型文档（文本长度 < 50 字符）
+- 以文件名为标题，不同文档之间用 `---` 分隔
+- 输出文件名：`MM-DD-doc.md`
+- 分别统计 PDF 和 DOCX 的解析情况
+
+**使用示例**：
+
+```bash
+# 解析 archive/asset/03-15 目录下的所有 PDF 和 DOCX
+node fetch_topics.js parse-doc archive/asset/03-15
+
+# 指定输出目录
+node fetch_topics.js parse-doc archive/asset/03-15 output
+```
+
+**输出格式**：
+
+```json
+{
+  "source_dir": "/path/to/doc/dir",
+  "output_file": "/path/to/archive/03-15-doc.md",
+  "total_files": 34,
+  "parsed_count": 34,
+  "skipped_count": 0,
+  "failed_count": 0,
+  "stats": {
+    "pdf": {
+      "total": 2,
+      "parsed": 2,
+      "skipped": 0,
+      "failed": 0
+    },
+    "docx": {
+      "total": 32,
+      "parsed": 32,
+      "skipped": 0,
+      "failed": 0
+    }
+  },
+  "failures": []
+}
+```
 
 ## 报告格式
 
