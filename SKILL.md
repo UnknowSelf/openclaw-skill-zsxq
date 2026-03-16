@@ -231,7 +231,6 @@ node {baseDir}/fetch_topics.js groups
 - 确定目标日期（今天、昨天或用户指定的日期）
 
 #### 步骤 2：导出帖子和附件
-**重要**： node命令的超时时间为20分钟
 
 对 groups.json 中每个星球，执行：
 
@@ -254,8 +253,22 @@ node {baseDir}/fetch_topics.js export-md 51122188845424 2026-03-15 all {baseDir}
 - 附件帖子（attachment）：包含 PDF、DOCX 等文档附件的帖子，仅作记录（文档内容通过 parse-doc 命令单独解析）
 
 如果有多个星球，依次导出，间隔 2 秒。
-**重要**：导出完成后再进行下一步，禁止提前进入下一步处理
-**重要**：如果20分钟仍然没有导出完成，终止导出进程并进入下一步并在结果中说明，禁止提前主动终止导出进程
+
+**⚠️ 关键执行规则（必须严格遵守）**：
+
+1. **等待命令完成**：必须等待 export-md 命令完全执行完成后，才能进入步骤3
+   - ❌ 禁止：命令还在运行时就开始读取文件
+   - ❌ 禁止：看到部分输出就认为完成了
+   - ✅ 正确：等待命令返回完整的 JSON 结果
+
+2. **超时处理**：
+   - 命令超时时间：20分钟
+   - 如果20分钟后命令仍未完成：终止进程，进入步骤3，并在报告中说明"导出超时，部分数据可能不完整"
+   - ❌ 禁止：提前主动终止（如5分钟、10分钟就终止）
+
+3. **进度判断**：
+   - 只有看到完整的 JSON 输出（包含 total_count、files_downloaded 等字段），才算完成
+   - 如果只看到日志输出（如 "fetching page 1..."），说明还在进行中，必须继续等待
 
 #### 步骤 3：读取导出的 Markdown 文件
 
@@ -361,22 +374,75 @@ cat {baseDir}/archive/03-15-doc.md
 - 检测相同或相似的研报标题
 - 合并重复内容，只保留一份
 
+#### 步骤 4.5：筛选重点标的内容（苹果 & 特斯拉）
+
+**目的**：提前筛选出苹果和特斯拉相关内容，确保在最终报告中不会遗漏。
+
+**执行方式**：使用 awk 命令提取完整的帖子或研报段落（以 `---` 为分隔符）。
+
+```bash
+# 筛选苹果相关内容（提取完整帖子）
+awk 'BEGIN{RS="---"; ORS="---\n"} /苹果|Apple|AAPL/ {print}' {baseDir}/archive/03-15-txtimg.md > {baseDir}/archive/03-15-apple.md
+
+# 如果没有找到任何内容，写入提示信息
+if [ ! -s {baseDir}/archive/03-15-apple.md ]; then
+  echo "本批次无苹果相关内容" > {baseDir}/archive/03-15-apple.md
+fi
+
+# 筛选苹果相关研报（提取完整研报）
+awk 'BEGIN{RS="---"; ORS="---\n"} /苹果|Apple|AAPL/ {print}' {baseDir}/archive/03-15-doc.md >> {baseDir}/archive/03-15-apple.md 2>/dev/null || true
+
+# 筛选特斯拉相关内容（提取完整帖子）
+awk 'BEGIN{RS="---"; ORS="---\n"} /特斯拉|Tesla|TSLA|马斯克|Musk/ {print}' {baseDir}/archive/03-15-txtimg.md > {baseDir}/archive/03-15-tesla.md
+
+# 如果没有找到任何内容，写入提示信息
+if [ ! -s {baseDir}/archive/03-15-tesla.md ]; then
+  echo "本批次无特斯拉相关内容" > {baseDir}/archive/03-15-tesla.md
+fi
+
+# 筛选特斯拉相关研报（提取完整研报）
+awk 'BEGIN{RS="---"; ORS="---\n"} /特斯拉|Tesla|TSLA|马斯克|Musk/ {print}' {baseDir}/archive/03-15-doc.md >> {baseDir}/archive/03-15-tesla.md 2>/dev/null || true
+```
+
+**命令说明**：
+- `RS="---"`：设置记录分隔符为 `---`，将文件按段落分割
+- `ORS="---\n"`：输出时保留 `---` 分隔符
+- `/关键词/`：匹配包含关键词的完整段落
+- `{print}`：输出整个匹配的段落（完整的帖子或研报）
+
+**输出文件**：
+- `{baseDir}/archive/03-15-apple.md`：所有提及苹果的完整帖子和研报
+- `{baseDir}/archive/03-15-tesla.md`：所有提及特斯拉的完整帖子和研报
+
+**读取筛选结果**：
+```bash
+cat {baseDir}/archive/03-15-apple.md
+cat {baseDir}/archive/03-15-tesla.md
+```
+
+**注意**：
+- 如果文件只包含"本批次无XXX相关内容"，说明该批次确实没有相关内容
+- 筛选结果包含完整的帖子或研报，不会截断内容
+- 每个段落之间保留 `---` 分隔符，便于阅读
 
 #### 步骤 5：汇总分析
 
 结合以下内容进行汇总分析：
 - **图文帖子内容**：`{baseDir}/archive/03-15-txtimg.md`（提取核心观点和投资建议）
 - **文档解析结果**：`{baseDir}/archive/03-15-doc.md`（提取研报精华和数据要点）
+- **苹果相关内容**：`{baseDir}/archive/03-15-apple.md`（专门用于"重点标的追踪"章节）
+- **特斯拉相关内容**：`{baseDir}/archive/03-15-tesla.md`（专门用于"重点标的追踪"章节）
 
 **注意**：
 - 必须读取全文进行汇总
 - 附件帖子文件（`03-15-attachment.md`）仅作记录，不需要读取
 - 文档内容已通过 parse-doc 命令解析并保存在 `03-15-doc.md` 中
+- 苹果和特斯拉内容已单独筛选到 `03-15-apple.md` 和 `03-15-tesla.md`
 
-** 按报告格式输出，重点关注： **
+**按报告格式输出，重点关注**：
 - 图文帖子中的核心观点和投资建议
 - 文档附件中的研报精华和数据要点
-- 苹果和特斯拉相关内容的专门汇总同一板块，提取共识观点）
+- 苹果和特斯拉相关内容的专门汇总（使用步骤 4.5 筛选的文件）
 
 ---
 
@@ -437,6 +503,10 @@ cat {baseDir}/archive/03-15-doc.md
 
 ### 三、重点标的追踪（苹果 & 特斯拉）
 
+**数据来源**：使用步骤 4.5 生成的筛选文件
+- 苹果内容：`{baseDir}/archive/03-15-apple.md`
+- 特斯拉内容：`{baseDir}/archive/03-15-tesla.md`
+
 **专门汇总苹果（Apple/AAPL）和特斯拉（Tesla/TSLA）相关内容**：
 
 #### 苹果（Apple/AAPL）
@@ -455,8 +525,8 @@ cat {baseDir}/archive/03-15-doc.md
 
 **识别规则**：
 - 关键词匹配：苹果、Apple、AAPL、特斯拉、Tesla、TSLA、马斯克、Musk
-- 从帖子正文、文档附件、标的列表中提取
-- 如果本批次没有相关内容，标注"本批次无苹果/特斯拉相关内容"
+- 从步骤 4.5 筛选的专门文件中提取（`03-15-apple.md` 和 `03-15-tesla.md`）
+- 如果筛选文件只包含"本批次无XXX相关内容"，则在报告中标注"本批次无苹果/特斯拉相关内容"
 
 ### 四、市场主题与趋势分析
 

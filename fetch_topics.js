@@ -16,6 +16,82 @@ const { URL } = require('url');
 const fs = require('fs');
 const path = require('path');
 
+// ── 单例锁机制 ───────────────────────────────────────────────
+const LOCK_FILE = path.join(__dirname, '.fetch_topics.lock');
+
+function acquireLock() {
+  try {
+    // 检查锁文件是否存在
+    if (fs.existsSync(LOCK_FILE)) {
+      const lockContent = fs.readFileSync(LOCK_FILE, 'utf-8');
+      const lockData = JSON.parse(lockContent);
+      const lockPid = lockData.pid;
+      
+      // 检查进程是否还在运行（Windows 和 Unix 兼容）
+      try {
+        process.kill(lockPid, 0); // 发送信号 0 只检查进程是否存在，不杀死进程
+        // 如果没有抛出异常，说明进程还在运行
+        console.error(JSON.stringify({
+          error: 'Another fetch_topics.js process is already running',
+          pid: lockPid,
+          started_at: lockData.started_at
+        }));
+        process.exit(1);
+      } catch (err) {
+        // 进程不存在，删除过期的锁文件
+        fs.unlinkSync(LOCK_FILE);
+      }
+    }
+    
+    // 创建锁文件
+    const lockData = {
+      pid: process.pid,
+      started_at: new Date().toISOString()
+    };
+    fs.writeFileSync(LOCK_FILE, JSON.stringify(lockData, null, 2), 'utf-8');
+    
+    // 注册退出时清理锁文件
+    const cleanupLock = () => {
+      try {
+        if (fs.existsSync(LOCK_FILE)) {
+          const currentLock = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf-8'));
+          // 只删除自己创建的锁文件
+          if (currentLock.pid === process.pid) {
+            fs.unlinkSync(LOCK_FILE);
+          }
+        }
+      } catch (err) {
+        // 忽略清理错误
+      }
+    };
+    
+    process.on('exit', cleanupLock);
+    process.on('SIGINT', () => {
+      cleanupLock();
+      process.exit(130);
+    });
+    process.on('SIGTERM', () => {
+      cleanupLock();
+      process.exit(143);
+    });
+    process.on('uncaughtException', (err) => {
+      console.error('Uncaught exception:', err);
+      cleanupLock();
+      process.exit(1);
+    });
+    
+  } catch (err) {
+    console.error(JSON.stringify({
+      error: 'Failed to acquire lock',
+      message: err.message
+    }));
+    process.exit(1);
+  }
+}
+
+// 在脚本开始时获取锁
+acquireLock();
+
 // 尝试加载 pdf-parse 和 mammoth（可选依赖）
 let pdfParse;
 let mammoth;
@@ -578,8 +654,10 @@ async function exportTopicsToMarkdown() {
   let attachmentCount = 0;
 
   // 定义处理单个帖子的函数
+  let topicCounter = 0; // 添加计数器
   const processTopic = async (topic) => {
-    info(`processing topic: ${topic.topic_id}`);
+    topicCounter += 1; // 递增计数器
+    info(`processing topic ${topicCounter}: ${topic.topic_id}`);
 
     const downloadedFiles = [];
     const downloadedImages = [];
@@ -665,6 +743,22 @@ async function exportTopicsToMarkdown() {
   await fetchAndProcessTopicsByDate(groupId, targetDateStr, scope, processTopic);
 
   info(`export completed: ${txtimgCount} txtimg topics, ${attachmentCount} attachment topics`);
+
+  // 添加明显的完成日志
+  info('========================================');
+  info('===== EXPORT-MD COMPLETED =====');
+  info('========================================');
+  info(`Total topics exported: ${txtimgCount + attachmentCount}`);
+  info(`  - Text & Image topics: ${txtimgCount}`);
+  info(`  - Document attachment topics: ${attachmentCount}`);
+  info(`Files downloaded: ${totalFileDownloaded}`);
+  info(`Images downloaded: ${totalImageDownloaded}`);
+  info(`Failed downloads: ${failures.length}`);
+  info(`Output files:`);
+  info(`  - ${txtimgPath}`);
+  info(`  - ${attachmentPath}`);
+  info(`  - ${attachmentsRoot}`);
+  info('========================================');
 
   console.log(JSON.stringify({
     group_id: groupId,
