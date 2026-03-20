@@ -1,18 +1,13 @@
 // fetch_topics.js — 知识星球数据抓取（HTTP API + PDF/DOCX 解析 + Markdown 导出）
 //
 // 子命令:
-//   node fetch_topics.js topics <group_id> [count] [scope]              获取帖子（scope: all|digests，默认 all）
-//   node fetch_topics.js digests <group_id> [count]                     获取精华帖（等价于 topics <id> [count] digests）
-//   node fetch_topics.js download-pdf <file_id>                         下载并解析 PDF 附件
-//   node fetch_topics.js download-docx <file_id>                        下载并解析 DOCX 附件
-//   node fetch_topics.js export-md <group_id> <count|YYYY-MM-DD> [scope] [output_dir]
-//                                                                 导出帖子为 Markdown 并下载附件
-//                                                                 count: 按数量导出，文件名 MM-DD-HH-mm-ss.md
-//                                                                 YYYY-MM-DD: 按日期导出，文件名 MM-DD.md
-//   node fetch_topics.js groups                                         列出已加入的星球
+//   node fetch_topics.js export-md <group_id> <YYYY-MM-DD> [scope] [output_dir]
+//                                                                 按日期导出帖子为 Markdown 并下载附件
+//   node fetch_topics.js parse-doc <doc_dir> [output_dir]        解析指定目录下的所有 PDF 和 DOCX 文件
+//   node fetch_topics.js groups                                  列出已加入的星球
 //
 // 环境变量:
-//   ZSXQ_TOKEN (必须) — 知识星球 zsxq_access_token cookie 值
+//   ZSXQ_TOKEN (必须，仅 export-md 和 groups 需要) — 知识星球 zsxq_access_token cookie 值
 //
 // 输出: JSON 到 stdout，日志到 log/ 目录和 stderr
 
@@ -20,6 +15,96 @@ const https = require('https');
 const { URL } = require('url');
 const fs = require('fs');
 const path = require('path');
+
+// ── 单例锁机制 ───────────────────────────────────────────────
+const LOCK_FILE = path.join(__dirname, '.fetch_topics.lock');
+
+function acquireLock() {
+  try {
+    // 检查锁文件是否存在
+    if (fs.existsSync(LOCK_FILE)) {
+      const lockContent = fs.readFileSync(LOCK_FILE, 'utf-8');
+      const lockData = JSON.parse(lockContent);
+      const lockPid = lockData.pid;
+      
+      // 检查进程是否还在运行（Windows 和 Unix 兼容）
+      try {
+        process.kill(lockPid, 0); // 发送信号 0 只检查进程是否存在，不杀死进程
+        // 如果没有抛出异常，说明进程还在运行
+        console.error(JSON.stringify({
+          error: 'Another fetch_topics.js process is already running',
+          pid: lockPid,
+          started_at: lockData.started_at
+        }));
+        process.exit(1);
+      } catch (err) {
+        // 进程不存在，删除过期的锁文件
+        fs.unlinkSync(LOCK_FILE);
+      }
+    }
+    
+    // 创建锁文件
+    const lockData = {
+      pid: process.pid,
+      started_at: new Date().toISOString()
+    };
+    fs.writeFileSync(LOCK_FILE, JSON.stringify(lockData, null, 2), 'utf-8');
+    
+    // 注册退出时清理锁文件
+    const cleanupLock = () => {
+      try {
+        if (fs.existsSync(LOCK_FILE)) {
+          const currentLock = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf-8'));
+          // 只删除自己创建的锁文件
+          if (currentLock.pid === process.pid) {
+            fs.unlinkSync(LOCK_FILE);
+          }
+        }
+      } catch (err) {
+        // 忽略清理错误
+      }
+    };
+    
+    process.on('exit', cleanupLock);
+    process.on('SIGINT', () => {
+      cleanupLock();
+      process.exit(130);
+    });
+    process.on('SIGTERM', () => {
+      cleanupLock();
+      process.exit(143);
+    });
+    process.on('uncaughtException', (err) => {
+      console.error('Uncaught exception:', err);
+      cleanupLock();
+      process.exit(1);
+    });
+    
+  } catch (err) {
+    console.error(JSON.stringify({
+      error: 'Failed to acquire lock',
+      message: err.message
+    }));
+    process.exit(1);
+  }
+}
+
+// 在脚本开始时获取锁
+acquireLock();
+
+// 尝试加载 pdf-parse 和 mammoth（可选依赖）
+let pdfParse;
+let mammoth;
+try {
+  pdfParse = require('pdf-parse');
+} catch (err) {
+  // pdf-parse 未安装，parse-pdf 命令将不可用
+}
+try {
+  mammoth = require('mammoth');
+} catch (err) {
+  // mammoth 未安装，docx 解析将不可用
+}
 
 // ── 日志系统 ───────────────────────────────────────────────
 const LOG_DIR = path.join(__dirname, 'log');
@@ -51,8 +136,11 @@ function warn(msg) { logToFile('WARN', msg); }
 function error(msg) { logToFile('ERROR', msg); }
 
 // ── 认证 ────────────────────────────────────────────────────
+const subcommand = process.argv[2] || 'topics';
 const ZSXQ_TOKEN = process.env.ZSXQ_TOKEN;
-if (!ZSXQ_TOKEN) {
+
+// parse-doc 命令不需要 token
+if (subcommand !== 'parse-doc' && !ZSXQ_TOKEN) {
   const errorMsg = JSON.stringify({ error: 'ZSXQ_TOKEN environment variable not set' });
   console.error(errorMsg);
   error(errorMsg);
@@ -62,15 +150,13 @@ if (!ZSXQ_TOKEN) {
 const BASE_URL = 'https://api.zsxq.com/v2';
 
 const HEADERS = {
-  Cookie: `zsxq_access_token=${ZSXQ_TOKEN}`,
+  Cookie: `zsxq_access_token=${ZSXQ_TOKEN || ''}`,
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   Origin: 'https://wx.zsxq.com',
   Referer: 'https://wx.zsxq.com/',
   Accept: 'application/json',
   'X-Timestamp': String(Math.floor(Date.now() / 1000)),
 };
-
-const subcommand = process.argv[2] || 'topics';
 
 // ── HTTP 请求 ───────────────────────────────────────────────
 function httpGet(url, options = {}) {
@@ -166,22 +252,15 @@ function toMdPath(filePath) {
   return filePath.split(path.sep).join('/');
 }
 
-function timestampTag() {
-  const d = new Date();
-  const parts = [
-    d.getFullYear(),
-    String(d.getMonth() + 1).padStart(2, '0'),
-    String(d.getDate()).padStart(2, '0'),
-    String(d.getHours()).padStart(2, '0'),
-    String(d.getMinutes()).padStart(2, '0'),
-    String(d.getSeconds()).padStart(2, '0'),
-  ];
-  return `${parts[0]}${parts[1]}${parts[2]}-${parts[3]}${parts[4]}${parts[5]}`;
+function escapeMdText(text) {
+  return String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/^#{1,6}\s+/gm, '- ') // 将 Markdown 标题替换为 -
+    .replace(/^(\d+)([、.])/gm, '\\$1$2') // 转义数字列表，防止被误识别
+    .replace(/^([-=])\1+$/gm, '\\$&') // 转义 Setext 标题下划线（--- 或 ===）
+    .replace(/\n/g, '  \n'); // 在每个换行前添加两个空格，实现 Markdown 硬换行
 }
 
-function escapeMdText(text) {
-  return String(text || '').replace(/\r\n/g, '\n');
-}
 
 function detectExtByHeaders(headers = {}) {
   const contentType = String(headers['content-type'] || '').toLowerCase();
@@ -303,253 +382,6 @@ function extractTopicImages(topic) {
   pushImages(answer.images);
 
   return images;
-}
-
-async function fetchTopicsData(groupId, count, scope, forceDigests = false) {
-  const isDigests = forceDigests || scope === 'digests';
-  const limitedCount = Math.max(1, Math.min(Number(count) || 20, 200));
-  const endpoint = isDigests
-    ? `${BASE_URL}/groups/${groupId}/topics?scope=digests&count=${Math.min(limitedCount, 30)}`
-    : `${BASE_URL}/groups/${groupId}/topics?scope=all&count=${Math.min(limitedCount, 30)}`;
-
-  info(`fetching ${isDigests ? 'digests' : 'all'} topics for group ${groupId} (count=${limitedCount})...`);
-
-  const allTopics = [];
-  let url = endpoint;
-  let pages = 0;
-  const maxPages = Math.ceil(limitedCount / 20) + 2;
-  let retryCount = 0;
-  const maxRetries = 3;
-
-  while (allTopics.length < limitedCount && pages < maxPages) {
-    let res;
-    try {
-      res = await httpGetWithRetry(url);
-    } catch (err) {
-      info(`fetch error: ${err.message}`);
-      break;
-    }
-
-    if (res.statusCode !== 200) {
-      info(`HTTP ${res.statusCode}: ${res.body.substring(0, 300)}`);
-      break;
-    }
-
-    const data = safeJsonParse(res.body);
-    if (!data) {
-      info(`non-JSON response: ${res.body.substring(0, 300)}`);
-      break;
-    }
-
-    if (!data.succeeded) {
-      retryCount++;
-      if (retryCount > maxRetries) {
-        info(`API error after ${maxRetries} retries: ${JSON.stringify(data)}`);
-        break;
-      }
-      info(`API error (retry ${retryCount}/${maxRetries}): ${JSON.stringify(data)}`);
-      info(`===== RETRYING SAME REQUEST =====`);
-      info(`retry URL: ${url}`);
-      info(`===================================`);
-      
-      await sleep(2000); // 等待2秒后重试
-      continue;
-    }
-
-    // 重置重试计数器（成功后）
-    retryCount = 0;
-
-    const topics = data.resp_data && data.resp_data.topics;
-    if (!Array.isArray(topics) || topics.length === 0) {
-      info('no more topics');
-      break;
-    }
-
-    for (const topic of topics) {
-      const files = extractTopicFiles(topic);
-      const images = extractTopicImages(topic);
-      const ownerObj = (topic.talk && topic.talk.owner) || (topic.question && topic.question.owner) || topic.owner || null;
-
-      allTopics.push({
-        topic_id: String(topic.topic_id),
-        type: topic.type,
-        title: topic.title || '',
-        text: extractTopicText(topic).substring(0, 2000),
-        create_time: topic.create_time,
-        owner: ownerObj ? { user_id: String(ownerObj.user_id), name: ownerObj.name } : null,
-        likes_count: topic.likes_count || 0,
-        comments_count: topic.comments_count || 0,
-        reading_count: topic.reading_count || 0,
-        readers_count: topic.readers_count || 0,
-        digested: topic.digested || false,
-        files,
-        pdf_files: files.filter((file) => file.name.toLowerCase().endsWith('.pdf')),
-        images,
-        image_count: images.length,
-      });
-
-      if (allTopics.length >= limitedCount) break;
-    }
-
-    info(`fetched ${allTopics.length}/${limitedCount} topics`);
-
-    const lastTopic = topics[topics.length - 1];
-    if (lastTopic && lastTopic.create_time && allTopics.length < limitedCount) {
-      const endTime = encodeURIComponent(lastTopic.create_time);
-      url = `${endpoint}&end_time=${endTime}`;
-      info(`===== PAGINATION DEBUG =====`);
-      info(`raw create_time: ${lastTopic.create_time}`);
-      info(`encoded end_time: ${endTime}`);
-      info(`full URL: ${url}`);
-      info(`============================`);
-      pages += 1;
-      await randomSleep();
-      continue;
-    }
-
-    break;
-  }
-
-  return {
-    group_id: String(groupId),
-    scope: isDigests ? 'digests' : 'all',
-    count: allTopics.length,
-    topics: allTopics,
-  };
-}
-
-// 按日期获取帖子，每次获取20条，持续分页直到超出日期范围
-async function fetchTopicsByDate(groupId, targetDateStr, scope) {
-  const isDigests = scope === 'digests';
-  const endpoint = isDigests
-    ? `${BASE_URL}/groups/${groupId}/topics?scope=digests&count=20`
-    : `${BASE_URL}/groups/${groupId}/topics?scope=all&count=20`;
-
-  info(`fetching ${isDigests ? 'digests' : 'all'} topics for date ${targetDateStr}...`);
-
-  const targetDate = new Date(targetDateStr);
-  const targetDateOnly = targetDate.toISOString().split('T')[0]; // YYYY-MM-DD
-  const allTopics = [];
-  let url = endpoint;
-  let pages = 0;
-  const maxPages = 50; // 最多翻50页，避免无限循环
-  let retryCount = 0;
-  const maxRetries = 3;
-
-  while (pages < maxPages) {
-    let res;
-    try {
-      res = await httpGetWithRetry(url);
-    } catch (err) {
-      info(`fetch error: ${err.message}`);
-      break;
-    }
-
-    if (res.statusCode !== 200) {
-      info(`HTTP ${res.statusCode}: ${res.body.substring(0, 300)}`);
-      break;
-    }
-
-    const data = safeJsonParse(res.body);
-    if (!data) {
-      info(`non-JSON response: ${res.body.substring(0, 300)}`);
-      break;
-    }
-
-    if (!data.succeeded) {
-      retryCount++;
-      if (retryCount > maxRetries) {
-        info(`API error after ${maxRetries} retries: ${JSON.stringify(data)}`);
-        break;
-      }
-      info(`API error (retry ${retryCount}/${maxRetries}): ${JSON.stringify(data)}`);
-      info(`===== RETRYING SAME REQUEST =====`);
-      info(`retry URL: ${url}`);
-      info(`===================================`);
-      
-      await sleep(2000); // 等待2秒后重试
-      continue;
-    }
-
-    // 重置重试计数器（成功后）
-    retryCount = 0;
-
-    const topics = data.resp_data && data.resp_data.topics;
-    if (!Array.isArray(topics) || topics.length === 0) {
-      info('no more topics');
-      break;
-    }
-
-    let foundOlderThanTarget = false;
-
-    for (const topic of topics) {
-      if (!topic.create_time) continue;
-
-      const topicDateOnly = topic.create_time.split('T')[0]; // YYYY-MM-DD
-      
-      if (topicDateOnly < targetDateOnly) {
-        foundOlderThanTarget = true;
-        break;
-      }
-
-      // 只收集目标日期的帖子
-      if (topicDateOnly === targetDateOnly) {
-        const files = extractTopicFiles(topic);
-        const images = extractTopicImages(topic);
-        const ownerObj = (topic.talk && topic.talk.owner) || (topic.question && topic.question.owner) || topic.owner || null;
-
-        allTopics.push({
-          topic_id: String(topic.topic_id),
-          type: topic.type,
-          title: topic.title || '',
-          text: extractTopicText(topic).substring(0, 2000),
-          create_time: topic.create_time,
-          owner: ownerObj ? { user_id: String(ownerObj.user_id), name: ownerObj.name } : null,
-          likes_count: topic.likes_count || 0,
-          comments_count: topic.comments_count || 0,
-          reading_count: topic.reading_count || 0,
-          readers_count: topic.readers_count || 0,
-          digested: topic.digested || false,
-          files,
-          pdf_files: files.filter((file) => file.name.toLowerCase().endsWith('.pdf')),
-          images,
-          image_count: images.length,
-        });
-      }
-    }
-
-    info(`page ${pages + 1}: found ${allTopics.length} topics for ${targetDateOnly}`);
-
-    // 如果已经找到比目标日期更早的帖子，停止翻页
-    if (foundOlderThanTarget) {
-      info(`reached topics older than ${targetDateOnly}, stopping`);
-      break;
-    }
-
-    // 继续翻页
-    const lastTopic = topics[topics.length - 1];
-    if (lastTopic && lastTopic.create_time) {
-      const endTime = encodeURIComponent(lastTopic.create_time);
-      url = `${endpoint}&end_time=${endTime}`;
-      info(`===== PAGINATION DEBUG =====`);
-      info(`raw create_time: ${lastTopic.create_time}`);
-      info(`encoded end_time: ${endTime}`);
-      info(`full URL: ${url}`);
-      info(`============================`);
-      pages += 1;
-      await randomSleep();
-      continue;
-    }
-
-    break;
-  }
-
-  return {
-    group_id: String(groupId),
-    scope: isDigests ? 'digests' : 'all',
-    count: allTopics.length,
-    topics: allTopics,
-  };
 }
 
 async function getFileDownloadUrl(fileId, maxRetries = 3) {
@@ -690,24 +522,23 @@ async function downloadImageAttachment(image, destDir, imageIndex, topicId) {
   throw lastErr || new Error('image download failed');
 }
 
-function buildTopicMarkdownBlock(topic, downloadedFiles, downloadedImages, fileErrors, imageErrors, mdBaseDir) {
+function buildTopicMarkdownBlock(topic, downloadedFiles, downloadedImages, fileErrors, imageErrors, mdBaseDir, topicIndex) {
   const lines = [];
   const ownerName = topic.owner && topic.owner.name ? topic.owner.name : '未知';
-  const title = topic.title ? escapeMdText(topic.title) : `话题 ${topic.topic_id}`;
 
-  lines.push(`## ${title}`);
+  lines.push(`## ${topicIndex}`);
   lines.push('');
   lines.push(`- 话题ID: ${topic.topic_id}`);
   // lines.push(`- 作者: ${escapeMdText(ownerName)}`);
   lines.push(`- 时间: ${topic.create_time || ''}`);
-  lines.push(`- 类型: ${topic.type || ''}`);
+  // lines.push(`- 类型: ${topic.type || ''}`);
   // lines.push(`- 精华: ${topic.digested ? '是' : '否'}`);
   // lines.push(`- 互动: 阅读 ${topic.reading_count} / 点赞 ${topic.likes_count} / 评论 ${topic.comments_count}`);
   // lines.push(`- 原帖: https://wx.zsxq.com/topic/${topic.topic_id}`);
   lines.push('');
 
   if (topic.text) {
-    lines.push('### 正文');
+    // lines.push('### 正文');
     lines.push('');
     lines.push(escapeMdText(topic.text));
     lines.push('');
@@ -718,11 +549,11 @@ function buildTopicMarkdownBlock(topic, downloadedFiles, downloadedImages, fileE
   const hasErrors = fileErrors.length > 0 || imageErrors.length > 0;
   
   if (hasAttachments || hasErrors) {
-    lines.push('### 附件');
+    // lines.push('### 附件');
     lines.push('');
 
     if (downloadedImages.length > 0) {
-      lines.push('#### 图片');
+      // lines.push('#### 图片');
       lines.push('');
       for (const image of downloadedImages) {
         const relPath = toMdPath(path.relative(mdBaseDir, image.abs_path));
@@ -732,7 +563,7 @@ function buildTopicMarkdownBlock(topic, downloadedFiles, downloadedImages, fileE
     }
 
     if (downloadedFiles.length > 0) {
-      lines.push('#### 文件/音频/文档');
+      lines.push('- 文件/音频/文档');
       lines.push('');
       for (const file of downloadedFiles) {
         const relPath = toMdPath(path.relative(mdBaseDir, file.abs_path));
@@ -743,7 +574,7 @@ function buildTopicMarkdownBlock(topic, downloadedFiles, downloadedImages, fileE
     }
 
     if (hasErrors) {
-      lines.push('#### 下载失败');
+      lines.push('- 下载失败');
       lines.push('');
       for (const err of fileErrors) {
         lines.push(`- 文件 ${err.name || err.id}: ${err.error}`);
@@ -760,314 +591,73 @@ function buildTopicMarkdownBlock(topic, downloadedFiles, downloadedImages, fileE
   return lines.join('\n');
 }
 
-// ── topics / digests ────────────────────────────────────────
-async function fetchTopics() {
-  const groupId = process.argv[3];
-  const count = parseInt(process.argv[4], 10) || 20;
-  const scope = process.argv[5] || 'all';
-
-  if (!groupId) {
-    const errorMsg = JSON.stringify({ error: 'Usage: node fetch_topics.js topics <group_id> [count] [scope]' });
-    console.error(errorMsg);
-    error(errorMsg);
-    process.exit(1);
-  }
-
-  const result = await fetchTopicsData(groupId, count, scope, subcommand === 'digests');
-  console.log(JSON.stringify(result, null, 2));
-}
-
-// ── download-pdf ────────────────────────────────────────────
-async function downloadPdf() {
-  const fileId = process.argv[3];
-  if (!fileId) {
-    const errorMsg = JSON.stringify({ error: 'Usage: node fetch_topics.js download-pdf <file_id>' });
-    console.error(errorMsg);
-    error(errorMsg);
-    process.exit(1);
-  }
-
-  info(`downloading PDF file_id=${fileId}...`);
-
-  try {
-    const metaUrl = `${BASE_URL}/files/${fileId}/download_url`;
-    const metaRes = await httpGetWithRetry(metaUrl);
-
-    if (metaRes.statusCode !== 200) {
-      console.log(JSON.stringify({ error: `HTTP ${metaRes.statusCode}`, file_id: fileId, detail: metaRes.body.substring(0, 300) }));
-      return;
-    }
-
-    const metaData = safeJsonParse(metaRes.body);
-    if (!metaData) {
-      console.log(JSON.stringify({ error: 'non_json_response', file_id: fileId }));
-      return;
-    }
-
-    if (!metaData.succeeded || !metaData.resp_data || !metaData.resp_data.download_url) {
-      console.log(JSON.stringify({ error: 'no_download_url', file_id: fileId, resp: metaData }));
-      return;
-    }
-
-    const downloadUrl = metaData.resp_data.download_url;
-    info('got download URL, fetching PDF...');
-
-    await sleep(1000);
-
-    const pdfRes = await httpGetWithRetry(downloadUrl, { raw: true, timeout: 30000 });
-
-    if (pdfRes.statusCode !== 200) {
-      console.log(JSON.stringify({ error: `PDF download HTTP ${pdfRes.statusCode}`, file_id: fileId }));
-      return;
-    }
-
-    const pdfBuffer = pdfRes.body;
-    info(`downloaded ${(pdfBuffer.length / 1024).toFixed(1)} KB`);
-
-    let pdfParse;
-    try {
-      pdfParse = require('pdf-parse');
-    } catch {
-      console.log(JSON.stringify({
-        error: 'pdf-parse not installed',
-        file_id: fileId,
-        hint: 'Run: cd ~/.openclaw/skills/zsxq-summary && npm install',
-      }));
-      return;
-    }
-
-    try {
-      const pdfData = await pdfParse(pdfBuffer);
-      const text = (pdfData.text || '').trim();
-      const truncated = text.length > 10000;
-
-      console.log(JSON.stringify({
-        file_id: fileId,
-        pages: pdfData.numpages || 0,
-        size_kb: Math.round(pdfBuffer.length / 1024),
-        text_length: text.length,
-        truncated,
-        text: truncated ? text.substring(0, 10000) : text,
-      }, null, 2));
-    } catch (parseErr) {
-      console.log(JSON.stringify({
-        file_id: fileId,
-        error: 'pdf_parse_failed',
-        message: parseErr.message,
-        size_kb: Math.round(pdfBuffer.length / 1024),
-        hint: '可能是扫描件 PDF，无法提取文本',
-      }));
-    }
-  } catch (err) {
-    console.log(JSON.stringify({ error: err.message, file_id: fileId }));
-  }
-}
-
-// ── download-docx ───────────────────────────────────────────
-async function downloadDocx() {
-  const fileId = process.argv[3];
-  if (!fileId) {
-    const errorMsg = JSON.stringify({ error: 'Usage: node fetch_topics.js download-docx <file_id>' });
-    console.error(errorMsg);
-    error(errorMsg);
-    process.exit(1);
-  }
-
-  info(`downloading DOCX file_id=${fileId}...`);
-
-  try {
-    const metaUrl = `${BASE_URL}/files/${fileId}/download_url`;
-    const metaRes = await httpGetWithRetry(metaUrl);
-
-    if (metaRes.statusCode !== 200) {
-      console.log(JSON.stringify({ error: `HTTP ${metaRes.statusCode}`, file_id: fileId, detail: metaRes.body.substring(0, 300) }));
-      return;
-    }
-
-    const metaData = safeJsonParse(metaRes.body);
-    if (!metaData) {
-      console.log(JSON.stringify({ error: 'non_json_response', file_id: fileId }));
-      return;
-    }
-
-    if (!metaData.succeeded || !metaData.resp_data || !metaData.resp_data.download_url) {
-      console.log(JSON.stringify({ error: 'no_download_url', file_id: fileId, resp: metaData }));
-      return;
-    }
-
-    const downloadUrl = metaData.resp_data.download_url;
-    info('got download URL, fetching DOCX...');
-
-    await sleep(1000);
-
-    const docxRes = await httpGetWithRetry(downloadUrl, { raw: true, timeout: 30000 });
-
-    if (docxRes.statusCode !== 200) {
-      console.log(JSON.stringify({ error: `DOCX download HTTP ${docxRes.statusCode}`, file_id: fileId }));
-      return;
-    }
-
-    const docxBuffer = docxRes.body;
-    info(`downloaded ${(docxBuffer.length / 1024).toFixed(1)} KB`);
-
-    let mammoth;
-    try {
-      mammoth = require('mammoth');
-    } catch {
-      console.log(JSON.stringify({
-        error: 'mammoth not installed',
-        file_id: fileId,
-        hint: 'Run: cd ~/.openclaw/skills/zsxq-summary && npm install',
-      }));
-      return;
-    }
-
-    try {
-      const result = await mammoth.extractRawText({ buffer: docxBuffer });
-      const text = (result.value || '').trim();
-      const truncated = text.length > 10000;
-
-      console.log(JSON.stringify({
-        file_id: fileId,
-        size_kb: Math.round(docxBuffer.length / 1024),
-        text_length: text.length,
-        truncated,
-        text: truncated ? text.substring(0, 10000) : text,
-      }, null, 2));
-    } catch (parseErr) {
-      console.log(JSON.stringify({
-        file_id: fileId,
-        error: 'docx_parse_failed',
-        message: parseErr.message,
-        size_kb: Math.round(docxBuffer.length / 1024),
-        hint: '无法提取 DOCX 文本',
-      }));
-    }
-  } catch (err) {
-    console.log(JSON.stringify({ error: err.message, file_id: fileId }));
-  }
-}
-
 // ── export-md ────────────────────────────────────────────────
 async function exportTopicsToMarkdown() {
   const groupId = process.argv[3];
-  const countOrDate = process.argv[4]; // 可以是数量或日期 (YYYY-MM-DD)
+  const targetDateStr = process.argv[4]; // YYYY-MM-DD
   const scope = process.argv[5] || 'all';
   const outputArg = process.argv[6] || 'archive';
 
-  if (!groupId) {
-    const errorMsg = JSON.stringify({ error: 'Usage: node fetch_topics.js export-md <group_id> <count|YYYY-MM-DD> [scope] [output_dir]' });
+  if (!groupId || !targetDateStr || !/^\d{4}-\d{2}-\d{2}$/.test(targetDateStr)) {
+    const errorMsg = JSON.stringify({ error: 'Usage: node fetch_topics.js export-md <group_id> <YYYY-MM-DD> [scope] [output_dir]' });
     console.error(errorMsg);
     error(errorMsg);
     process.exit(1);
   }
 
-  // 判断是按数量还是按日期导出
-  const isDateMode = countOrDate && /^\d{4}-\d{2}-\d{2}$/.test(countOrDate);
-  let count = 20;
-  let mdFileName = '';
-  let dateSubDir = ''; // 用于附件子目录
-
-  if (isDateMode) {
-    // 按日期导出模式
-    const targetDate = new Date(countOrDate);
-    const month = String(targetDate.getMonth() + 1).padStart(2, '0');
-    const day = String(targetDate.getDate()).padStart(2, '0');
-    mdFileName = `${month}-${day}.md`;
-    dateSubDir = `${month}-${day}`;
-    info(`date mode: exporting topics from ${countOrDate}`);
-  } else {
-    // 按数量导出模式
-    count = parseInt(countOrDate, 10) || 20;
-    const now = new Date();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const hour = String(now.getHours()).padStart(2, '0');
-    const minute = String(now.getMinutes()).padStart(2, '0');
-    const second = String(now.getSeconds()).padStart(2, '0');
-    mdFileName = `${month}-${day}-${hour}-${minute}-${second}.md`;
-    dateSubDir = `${month}-${day}`;
-    info(`count mode: exporting ${count} topics`);
-  }
+  // 按日期导出模式
+  const targetDate = new Date(targetDateStr);
+  const month = String(targetDate.getMonth() + 1).padStart(2, '0');
+  const day = String(targetDate.getDate()).padStart(2, '0');
+  const dateSubDir = `${month}-${day}`;
+  
+  info(`date mode: exporting topics from ${targetDateStr}`);
 
   const outputDir = path.resolve(process.cwd(), outputArg);
   const attachmentsRoot = path.join(outputDir, 'asset', dateSubDir);
-  const markdownPath = path.join(outputDir, mdFileName);
+  const txtimgPath = path.join(outputDir, `${month}-${day}-txtimg.md`);
+  const attachmentPath = path.join(outputDir, `${month}-${day}-attachment.md`);
 
   info(`exporting topics to markdown: group=${groupId}, scope=${scope}`);
   info(`output dir: ${outputDir}`);
-  info(`markdown file: ${mdFileName}`);
+  info(`txtimg file: ${month}-${day}-txtimg.md`);
+  info(`attachment file: ${month}-${day}-attachment.md`);
   info(`attachments dir: ${attachmentsRoot}`);
 
   await ensureDir(outputDir);
   await ensureDir(attachmentsRoot);
 
-  const failures = [];
-  let totalFileDownloaded = 0;
-  let totalImageDownloaded = 0;
-  let topicsCount = 0;
-  let currentFileIndex = 1;
-  let topicsInCurrentFile = 0;
-  const topicsPerFile = 100; // 每5页（5 * 20 = 100个帖子）生成一个文件
-  
-  // 生成当前文件名
-  const getMarkdownFileName = (fileIndex) => {
-    if (isDateMode) {
-      const targetDate = new Date(countOrDate);
-      const month = String(targetDate.getMonth() + 1).padStart(2, '0');
-      const day = String(targetDate.getDate()).padStart(2, '0');
-      return `${month}-${day}-${String(fileIndex).padStart(2, '0')}.md`;
-    } else {
-      const now = new Date();
-      const month = String(now.getMonth() + 1).padStart(2, '0');
-      const day = String(now.getDate()).padStart(2, '0');
-      const hour = String(now.getHours()).padStart(2, '0');
-      const minute = String(now.getMinutes()).padStart(2, '0');
-      const second = String(now.getSeconds()).padStart(2, '0');
-      return `${month}-${day}-${hour}-${minute}-${second}-${String(fileIndex).padStart(2, '0')}.md`;
-    }
-  };
-  
-  let currentMarkdownPath = path.join(outputDir, getMarkdownFileName(currentFileIndex));
-  
-  // 写入当前文件的头部
-  const writeFileHeader = async (filePath, fileIndex) => {
+  // 写入文件头部的辅助函数
+  const writeFileHeader = async (filePath, fileType) => {
     const headerLines = [];
     headerLines.push('# 知识星球帖子导出');
     headerLines.push('');
     headerLines.push(`- group_id: ${groupId}`);
     headerLines.push(`- scope: ${scope}`);
-    headerLines.push(`- file_index: ${fileIndex}`);
-    if (isDateMode) {
-      headerLines.push(`- export_mode: date (${countOrDate})`);
-    } else {
-      headerLines.push(`- export_mode: count (${count})`);
-    }
+    headerLines.push(`- type: ${fileType}`);
+    headerLines.push(`- export_mode: date (${targetDateStr})`);
     headerLines.push(`- exported_at: ${new Date().toISOString()}`);
     headerLines.push('');
     headerLines.push('---');
     headerLines.push('');
     await fs.promises.writeFile(filePath, headerLines.join('\n'), 'utf-8');
   };
-  
-  await writeFileHeader(currentMarkdownPath, currentFileIndex);
+
+  // 初始化两个文件
+  await writeFileHeader(txtimgPath, 'text and images');
+  await writeFileHeader(attachmentPath, 'with document attachments');
+
+  const failures = [];
+  let totalFileDownloaded = 0;
+  let totalImageDownloaded = 0;
+  let txtimgCount = 0;
+  let attachmentCount = 0;
 
   // 定义处理单个帖子的函数
+  let topicCounter = 0; // 添加计数器
   const processTopic = async (topic) => {
-    topicsCount += 1;
-    topicsInCurrentFile += 1;
-    
-    // 检查是否需要创建新文件
-    if (topicsInCurrentFile > topicsPerFile) {
-      info(`completed file ${currentFileIndex} with ${topicsInCurrentFile - 1} topics`);
-      currentFileIndex += 1;
-      topicsInCurrentFile = 1;
-      currentMarkdownPath = path.join(outputDir, getMarkdownFileName(currentFileIndex));
-      await writeFileHeader(currentMarkdownPath, currentFileIndex);
-      info(`starting new file ${currentFileIndex}: ${path.basename(currentMarkdownPath)}`);
-    }
-    
-    info(`processing topic ${topicsCount} (file ${currentFileIndex}, topic ${topicsInCurrentFile}): ${topic.topic_id}`);
+    topicCounter += 1; // 递增计数器
+    info(`processing topic ${topicCounter}: ${topic.topic_id}`);
 
     const downloadedFiles = [];
     const downloadedImages = [];
@@ -1133,29 +723,52 @@ async function exportTopicsToMarkdown() {
     
     info(`topic ${topic.topic_id}: downloaded ${downloadedFiles.length}/${files.length} files, ${downloadedImages.length}/${images.length} images`);
 
-    // 生成帖子的 Markdown 内容并立即追加到当前文件
-    const topicMd = buildTopicMarkdownBlock(topic, downloadedFiles, downloadedImages, fileErrors, imageErrors, outputDir);
-    await fs.promises.appendFile(currentMarkdownPath, topicMd, 'utf-8');
+    // 判断帖子类型：有文档附件 vs 图文
+    const hasDocumentAttachment = downloadedFiles.length > 0 || fileErrors.length > 0;
+    
+    if (hasDocumentAttachment) {
+      // 有文档附件的帖子
+      attachmentCount += 1;
+      const topicMd = buildTopicMarkdownBlock(topic, downloadedFiles, downloadedImages, fileErrors, imageErrors, outputDir, attachmentCount);
+      await fs.promises.appendFile(attachmentPath, topicMd, 'utf-8');
+    } else {
+      // 图文帖子（只有文本和图片）
+      txtimgCount += 1;
+      const topicMd = buildTopicMarkdownBlock(topic, downloadedFiles, downloadedImages, fileErrors, imageErrors, outputDir, txtimgCount);
+      await fs.promises.appendFile(txtimgPath, topicMd, 'utf-8');
+    }
   };
 
-  // 根据模式选择不同的处理方式
-  if (isDateMode) {
-    // 按日期模式：边获取边处理
-    await fetchAndProcessTopicsByDate(groupId, countOrDate, scope, processTopic);
-  } else {
-    // 按数量模式：边获取边处理
-    await fetchAndProcessTopicsByCount(groupId, count, scope, processTopic);
-  }
+  // 按日期模式：边获取边处理
+  await fetchAndProcessTopicsByDate(groupId, targetDateStr, scope, processTopic);
 
-  info(`completed file ${currentFileIndex} with ${topicsInCurrentFile} topics`);
-  info(`total files created: ${currentFileIndex}`);
+  info(`export completed: ${txtimgCount} txtimg topics, ${attachmentCount} attachment topics`);
+
+  // 添加明显的完成日志
+  info('========================================');
+  info('===== EXPORT-MD COMPLETED =====');
+  info('========================================');
+  info(`Total topics exported: ${txtimgCount + attachmentCount}`);
+  info(`  - Text & Image topics: ${txtimgCount}`);
+  info(`  - Document attachment topics: ${attachmentCount}`);
+  info(`Files downloaded: ${totalFileDownloaded}`);
+  info(`Images downloaded: ${totalImageDownloaded}`);
+  info(`Failed downloads: ${failures.length}`);
+  info(`Output files:`);
+  info(`  - ${txtimgPath}`);
+  info(`  - ${attachmentPath}`);
+  info(`  - ${attachmentsRoot}`);
+  info('========================================');
 
   console.log(JSON.stringify({
     group_id: groupId,
     scope: scope,
-    export_mode: isDateMode ? `date (${countOrDate})` : `count (${count})`,
-    topics_count: topicsCount,
-    files_count: currentFileIndex,
+    export_mode: `date (${targetDateStr})`,
+    txtimg_count: txtimgCount,
+    attachment_count: attachmentCount,
+    total_count: txtimgCount + attachmentCount,
+    txtimg_file: txtimgPath,
+    attachment_file: attachmentPath,
     output_dir: outputDir,
     attachments_dir: attachmentsRoot,
     files_downloaded: totalFileDownloaded,
@@ -1163,116 +776,6 @@ async function exportTopicsToMarkdown() {
     failed_count: failures.length,
     failures,
   }, null, 2));
-}
-
-// 按数量获取并处理帖子（流式）
-async function fetchAndProcessTopicsByCount(groupId, count, scope, processCallback) {
-  const isDigests = scope === 'digests';
-  const limitedCount = Math.max(1, Math.min(Number(count) || 20, 200));
-  const endpoint = isDigests
-    ? `${BASE_URL}/groups/${groupId}/topics?scope=digests&count=20`
-    : `${BASE_URL}/groups/${groupId}/topics?scope=all&count=20`;
-
-  info(`fetching ${isDigests ? 'digests' : 'all'} topics for group ${groupId} (count=${limitedCount})...`);
-
-  let processedCount = 0;
-  let url = endpoint;
-  let pages = 0;
-  const maxPages = Math.ceil(limitedCount / 20) + 2;
-  let retryCount = 0;
-  const maxRetries = 3;
-
-  while (processedCount < limitedCount && pages < maxPages) {
-    let res;
-    try {
-      res = await httpGetWithRetry(url);
-    } catch (err) {
-      info(`fetch error: ${err.message}`);
-      break;
-    }
-
-    if (res.statusCode !== 200) {
-      info(`HTTP ${res.statusCode}: ${res.body.substring(0, 300)}`);
-      break;
-    }
-
-    const data = safeJsonParse(res.body);
-    if (!data) {
-      info(`non-JSON response: ${res.body.substring(0, 300)}`);
-      break;
-    }
-
-    if (!data.succeeded) {
-      retryCount++;
-      if (retryCount > maxRetries) {
-        info(`API error after ${maxRetries} retries: ${JSON.stringify(data)}`);
-        break;
-      }
-      info(`API error (retry ${retryCount}/${maxRetries}): ${JSON.stringify(data)}`);
-      info(`===== RETRYING SAME REQUEST =====`);
-      info(`retry URL: ${url}`);
-      info(`===================================`);
-      
-      await sleep(2000); // 等待2秒后重试
-      continue;
-    }
-
-    // 重置重试计数器（成功后）
-    retryCount = 0;
-
-    const topics = data.resp_data && data.resp_data.topics;
-    if (!Array.isArray(topics) || topics.length === 0) {
-      info('no more topics');
-      break;
-    }
-
-    for (const rawTopic of topics) {s(rawTopic);
-      const images = extractTopicImages(rawTopic);
-      const ownerObj = (rawTopic.talk && rawTopic.talk.owner) || (rawTopic.question && rawTopic.question.owner) || rawTopic.owner || null;
-
-      const topic = {
-        topic_id: String(rawTopic.topic_id),
-        type: rawTopic.type,
-        title: rawTopic.title || '',
-        text: extractTopicText(rawTopic).substring(0, 2000),
-        create_time: rawTopic.create_time,
-        owner: ownerObj ? { user_id: String(ownerObj.user_id), name: ownerObj.name } : null,
-        likes_count: rawTopic.likes_count || 0,
-        comments_count: rawTopic.comments_count || 0,
-        reading_count: rawTopic.reading_count || 0,
-        readers_count: rawTopic.readers_count || 0,
-        digested: rawTopic.digested || false,
-        files,
-        pdf_files: files.filter((file) => file.name.toLowerCase().endsWith('.pdf')),
-        images,
-        image_count: images.length,
-      };
-
-      // 立即处理这个帖子
-      await processCallback(topic);
-      processedCount += 1;
-
-      if (processedCount >= limitedCount) break;
-    }
-
-    info(`processed ${processedCount}/${limitedCount} topics`);
-
-    const lastTopic = topics[topics.length - 1];
-    if (lastTopic && lastTopic.create_time && processedCount < limitedCount) {
-      const endTime = encodeURIComponent(lastTopic.create_time);
-      url = `${endpoint}&end_time=${endTime}`;
-      info(`===== PAGINATION DEBUG =====`);
-      info(`raw create_time: ${lastTopic.create_time}`);
-      info(`encoded end_time: ${endTime}`);
-      info(`full URL: ${url}`);
-      info(`============================`);
-      pages += 1;
-      await randomSleep();
-      continue;
-    }
-
-    break;
-  }
 }
 
 // 按日期获取并处理帖子（流式）
@@ -1399,6 +902,191 @@ async function fetchAndProcessTopicsByDate(groupId, targetDateStr, scope, proces
   }
 }
 
+// ── parse-doc ────────────────────────────────────────────────
+async function parseDocFiles() {
+  const docDir = process.argv[3];
+  const outputArg = process.argv[4] || 'archive';
+
+  if (!docDir) {
+    const errorMsg = JSON.stringify({ error: 'Usage: node fetch_topics.js parse-doc <doc_dir> [output_dir]' });
+    console.error(errorMsg);
+    error(errorMsg);
+    process.exit(1);
+  }
+
+  const docDirPath = path.resolve(process.cwd(), docDir);
+
+  if (!fs.existsSync(docDirPath)) {
+    const errorMsg = JSON.stringify({ error: `Directory not found: ${docDirPath}` });
+    console.error(errorMsg);
+    error(errorMsg);
+    process.exit(1);
+  }
+
+  info(`parsing documents from directory: ${docDirPath}`);
+
+  // 获取当前日期用于文件名
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+
+  const outputDir = path.resolve(process.cwd(), outputArg);
+  const outputPath = path.join(outputDir, `${month}-${day}-doc.md`);
+
+  await ensureDir(outputDir);
+
+  // 写入文件头部
+  const headerLines = [];
+  headerLines.push('# 文档解析结果');
+  headerLines.push('');
+  headerLines.push(`- source_dir: ${docDirPath}`);
+  headerLines.push(`- parsed_at: ${now.toISOString()}`);
+  headerLines.push('');
+  headerLines.push('---');
+  headerLines.push('');
+  await fs.promises.writeFile(outputPath, headerLines.join('\n'), 'utf-8');
+
+  // 检查依赖是否可用
+  if (!pdfParse) {
+    const errorMsg = JSON.stringify({
+      error: 'pdf-parse not installed',
+      hint: 'Run: npm install',
+    });
+    console.error(errorMsg);
+    error(errorMsg);
+    process.exit(1);
+  }
+
+  if (!mammoth) {
+    const errorMsg = JSON.stringify({
+      error: 'mammoth not installed',
+      hint: 'Run: npm install',
+    });
+    console.error(errorMsg);
+    error(errorMsg);
+    process.exit(1);
+  }
+
+  // 递归查找所有 PDF 和 DOCX 文件
+  const findDocFiles = (dir) => {
+    const results = [];
+    const items = fs.readdirSync(dir);
+
+    for (const item of items) {
+      const fullPath = path.join(dir, item);
+      const stat = fs.statSync(fullPath);
+
+      if (stat.isDirectory()) {
+        results.push(...findDocFiles(fullPath));
+      } else {
+        const lowerName = item.toLowerCase();
+        if (lowerName.endsWith('.pdf') || lowerName.endsWith('.docx')) {
+          results.push(fullPath);
+        }
+      }
+    }
+
+    return results;
+  };
+
+  const docFiles = findDocFiles(docDirPath);
+  info(`found ${docFiles.length} document files`);
+
+  let parsedCount = 0;
+  let skippedCount = 0;
+  const failures = [];
+  const stats = {
+    pdf: { total: 0, parsed: 0, skipped: 0, failed: 0 },
+    docx: { total: 0, parsed: 0, skipped: 0, failed: 0 },
+  };
+
+  for (const docPath of docFiles) {
+    const fileName = path.basename(docPath);
+    const fileExt = path.extname(fileName).toLowerCase();
+    const fileType = fileExt === '.pdf' ? 'pdf' : 'docx';
+
+    stats[fileType].total += 1;
+    info(`parsing ${fileType.toUpperCase()}: ${fileName}`);
+
+    try {
+      let text = '';
+      let metadata = {};
+
+      if (fileType === 'pdf') {
+        // 解析 PDF
+        const pdfBuffer = fs.readFileSync(docPath);
+        const pdfData = await pdfParse(pdfBuffer);
+        text = (pdfData.text || '').trim();
+        metadata = {
+          pages: pdfData.numpages || 0,
+          size_kb: Math.round(pdfBuffer.length / 1024),
+        };
+      } else {
+        // 解析 DOCX
+        const docxBuffer = fs.readFileSync(docPath);
+        const result = await mammoth.extractRawText({ buffer: docxBuffer });
+        text = (result.value || '').trim();
+        metadata = {
+          size_kb: Math.round(docxBuffer.length / 1024),
+        };
+      }
+
+      // 如果文本为空或太短，认为是图片文档，跳过
+      if (!text || text.length < 50) {
+        info(`skipping image-based ${fileType.toUpperCase()}: ${fileName}`);
+        skippedCount += 1;
+        stats[fileType].skipped += 1;
+        continue;
+      }
+
+      // 写入 Markdown
+      const lines = [];
+      lines.push(`## ${fileName}`);
+      lines.push('');
+      lines.push(`- 文件类型: ${fileType.toUpperCase()}`);
+      if (metadata.pages) {
+        lines.push(`- 页数: ${metadata.pages}`);
+      }
+      lines.push(`- 文件大小: ${metadata.size_kb} KB`);
+      lines.push(`- 文本长度: ${text.length} 字符`);
+      lines.push('');
+      lines.push(escapeMdText(text));
+      lines.push('');
+      lines.push('---');
+      lines.push('');
+
+      await fs.promises.appendFile(outputPath, lines.join('\n'), 'utf-8');
+      parsedCount += 1;
+      stats[fileType].parsed += 1;
+      info(`parsed successfully: ${fileName}`);
+
+    } catch (err) {
+      info(`failed to parse: ${fileName} - ${err.message}`);
+      stats[fileType].failed += 1;
+      failures.push({
+        file: fileName,
+        path: docPath,
+        type: fileType,
+        error: err.message,
+      });
+    }
+  }
+
+  info(`parsing completed: ${parsedCount} parsed, ${skippedCount} skipped, ${failures.length} failed`);
+
+  console.log(JSON.stringify({
+    source_dir: docDirPath,
+    output_file: outputPath,
+    total_files: docFiles.length,
+    parsed_count: parsedCount,
+    skipped_count: skippedCount,
+    failed_count: failures.length,
+    stats,
+    failures,
+  }, null, 2));
+}
+
+
 // ── groups ───────────────────────────────────────────────────
 async function fetchGroups() {
   info('fetching joined groups...');
@@ -1443,26 +1131,17 @@ async function fetchGroups() {
 (async () => {
   try {
     switch (subcommand) {
-      case 'topics':
-        await fetchTopics();
-        break;
-      case 'digests':
-        await fetchTopics();
-        break;
-      case 'download-pdf':
-        await downloadPdf();
-        break;
-      case 'download-docx':
-        await downloadDocx();
-        break;
       case 'export-md':
         await exportTopicsToMarkdown();
+        break;
+      case 'parse-doc':
+        await parseDocFiles();
         break;
       case 'groups':
         await fetchGroups();
         break;
       default:
-        const errorMsg = `Unknown subcommand: ${subcommand}. Use: topics, digests, download-pdf, download-docx, export-md, groups`;
+        const errorMsg = `Unknown subcommand: ${subcommand}. Use: export-md, parse-doc, groups`;
         console.error(errorMsg);
         error(errorMsg);
         process.exit(1);
