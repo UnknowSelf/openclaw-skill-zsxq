@@ -3,11 +3,13 @@
 // 子命令:
 //   node fetch_topics.js export-md <group_id> <YYYY-MM-DD> [scope] [output_dir]
 //                                                                 按日期导出帖子为 Markdown 并下载附件
+//   node fetch_topics.js export-doc <group_id> <YYYY-MM-DD> [scope] [output_dir]
+//                                                                 按日期只下载帖子中的文档附件
 //   node fetch_topics.js parse-doc <doc_dir> [output_dir]        解析指定目录下的所有 PDF 和 DOCX 文件
 //   node fetch_topics.js groups                                  列出已加入的星球
 //
 // 环境变量:
-//   ZSXQ_TOKEN (必须，仅 export-md 和 groups 需要) — 知识星球 zsxq_access_token cookie 值
+//   ZSXQ_TOKEN (必须，仅 export-md / export-doc / groups 需要) — 知识星球 zsxq_access_token cookie 值
 //
 // 输出: JSON 到 stdout，日志到 log/ 目录和 stderr
 
@@ -196,10 +198,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// 随机延迟 2-5 秒，用于下载请求之间的停顿
+// 随机延迟 1-3 秒，用于下载请求之间的停顿
 function randomSleep() {
-  const min = 2000; // 2 秒
-  const max = 5000; // 5 秒
+  const min = 1000; // 1 秒
+  const max = 3000; // 3 秒
   const ms = Math.floor(Math.random() * (max - min + 1)) + min;
   info(`waiting ${(ms / 1000).toFixed(1)}s before next download...`);
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -238,14 +240,31 @@ function safeJsonParse(text) {
   }
 }
 
-function sanitizeFileName(name) {
+function sanitizeFileName(name, stableSuffix = '') {
   const source = (name || '').trim();
   const cleaned = source
     .replace(/[<>:"/\\|?*]/g, '_')
     .replace(/[\x00-\x1f]/g, '_')
     .replace(/\s+/g, ' ')
     .trim();
-  return cleaned || 'unnamed';
+  const normalized = cleaned || 'unnamed';
+  if (Buffer.byteLength(normalized, 'utf8') <= 180) {
+    return normalized;
+  }
+
+  const parsed = path.parse(normalized);
+  const ext = parsed.ext || '';
+  const suffixText = String(stableSuffix || '')
+    .replace(/[<>:"/\\|?*]/g, '_')
+    .replace(/[\x00-\x1f]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const suffix = suffixText ? `_${suffixText}` : '';
+  let base = parsed.name || 'unnamed';
+  while (base && Buffer.byteLength(base + suffix + ext, 'utf8') > 180) {
+    base = base.slice(0, -1);
+  }
+  return `${base || 'file'}${suffix}${ext}`;
 }
 
 function toMdPath(filePath) {
@@ -279,6 +298,13 @@ async function ensureDir(dirPath) {
   await fs.promises.mkdir(dirPath, { recursive: true });
 }
 
+function resolveOutputDir(outputArg) {
+  if (outputArg == null) {
+    return path.join(__dirname, 'archive');
+  }
+  return path.resolve(process.cwd(), outputArg);
+}
+
 async function writeBinaryFile(filePath, buffer) {
   await ensureDir(path.dirname(filePath));
   await fs.promises.writeFile(filePath, buffer);
@@ -287,6 +313,38 @@ async function writeBinaryFile(filePath, buffer) {
 function pickFileExtByName(fileName) {
   const ext = path.extname(fileName || '').trim();
   return ext ? ext.toLowerCase() : '';
+}
+
+function isAudioFileName(fileName) {
+  const lowerName = String(fileName || '').toLowerCase();
+  return lowerName.endsWith('.mp3') || lowerName.endsWith('.m4a') || lowerName.endsWith('.wav');
+}
+
+function loadConfiguredGroups() {
+  const groupsPath = path.join(__dirname, 'groups.json');
+  if (!fs.existsSync(groupsPath)) {
+    throw new Error(`groups.json not found: ${groupsPath}`);
+  }
+
+  const raw = fs.readFileSync(groupsPath, 'utf-8');
+  const data = safeJsonParse(raw);
+  if (!Array.isArray(data) || data.length === 0) {
+    throw new Error('groups.json is empty or invalid');
+  }
+
+  const groups = data
+    .filter((item) => item && item.group_id)
+    .map((item) => ({
+      group_id: String(item.group_id),
+      scope: item.scope === 'digests' ? 'digests' : 'all',
+      name: item.name || '',
+    }));
+
+  if (groups.length === 0) {
+    throw new Error('groups.json has no valid group_id entries');
+  }
+
+  return groups;
 }
 
 function buildImageUrlCandidates(image) {
@@ -438,8 +496,8 @@ async function downloadBinaryFromUrl(url, timeout = 30000, maxRetries = 3) {
 }
 
 async function downloadFileAttachment(file, destDir, fileIndex, topicId) {
-  const safeName = sanitizeFileName(file.name || `file_${file.file_id}`);
-  const fileName = safeName;
+  const fallbackName = `file_${file.file_id || fileIndex}`;
+  const fileName = sanitizeFileName(file.name || fallbackName, file.file_id || `${topicId}_${fileIndex}`);
   const absPath = path.join(destDir, fileName);
 
   // 检查文件是否已存在
@@ -448,6 +506,7 @@ async function downloadFileAttachment(file, destDir, fileIndex, topicId) {
     info(`file already exists, skipping: ${fileName}`);
     return {
       kind: 'file',
+      skipped: true,
       file_id: file.file_id,
       original_name: file.name,
       saved_name: fileName,
@@ -464,6 +523,7 @@ async function downloadFileAttachment(file, destDir, fileIndex, topicId) {
 
   return {
     kind: 'file',
+    skipped: false,
     file_id: file.file_id,
     original_name: file.name,
     saved_name: fileName,
@@ -488,6 +548,7 @@ async function downloadImageAttachment(image, destDir, imageIndex, topicId) {
     info(`image already exists, skipping: ${fileName}`);
     return {
       kind: 'image',
+      skipped: true,
       image_id: image.image_id,
       saved_name: path.basename(absPath),
       size: stats.size,
@@ -508,6 +569,7 @@ async function downloadImageAttachment(image, destDir, imageIndex, topicId) {
 
       return {
         kind: 'image',
+        skipped: false,
         image_id: image.image_id,
         saved_name: path.basename(finalAbsPath),
         size: imgRes.body.length,
@@ -596,7 +658,7 @@ async function exportTopicsToMarkdown() {
   const groupId = process.argv[3];
   const targetDateStr = process.argv[4]; // YYYY-MM-DD
   const scope = process.argv[5] || 'all';
-  const outputArg = process.argv[6] || 'archive';
+  const outputArg = process.argv[6];
 
   if (!groupId || !targetDateStr || !/^\d{4}-\d{2}-\d{2}$/.test(targetDateStr)) {
     const errorMsg = JSON.stringify({ error: 'Usage: node fetch_topics.js export-md <group_id> <YYYY-MM-DD> [scope] [output_dir]' });
@@ -613,7 +675,7 @@ async function exportTopicsToMarkdown() {
   
   info(`date mode: exporting topics from ${targetDateStr}`);
 
-  const outputDir = path.resolve(process.cwd(), outputArg);
+  const outputDir = resolveOutputDir(outputArg);
   const attachmentsRoot = path.join(outputDir, 'asset', dateSubDir);
   const txtimgPath = path.join(outputDir, `${month}-${day}-txtimg.md`);
   const attachmentPath = path.join(outputDir, `${month}-${day}-attachment.md`);
@@ -671,16 +733,16 @@ async function exportTopicsToMarkdown() {
     let fileIndex = 1;
     for (const file of files) {
       // 跳过音频文件
-      const fileName = (file.name || '').toLowerCase();
-      if (fileName.endsWith('.mp3') || fileName.endsWith('.m4a') || fileName.endsWith('.wav')) {
+      if (isAudioFileName(file.name)) {
         info(`skipping audio file: ${file.name}`);
         fileIndex += 1;
         continue;
       }
-      
+      let shouldSleep = true;
       try {
         const result = await downloadFileAttachment(file, attachmentsRoot, fileIndex, topic.topic_id);
         downloadedFiles.push(result);
+        shouldSleep = !result.skipped;
         totalFileDownloaded += 1;
       } catch (err) {
         const item = {
@@ -695,15 +757,19 @@ async function exportTopicsToMarkdown() {
       }
 
       fileIndex += 1;
-      await sleep(1000);
+      if (shouldSleep) {
+        await sleep(1000);
+      }
     }
 
     // 下载图片
     let imageIndex = 1;
     for (const image of images) {
+      let shouldSleep = true;
       try {
         const result = await downloadImageAttachment(image, attachmentsRoot, imageIndex, topic.topic_id);
         downloadedImages.push(result);
+        shouldSleep = !result.skipped;
         totalImageDownloaded += 1;
       } catch (err) {
         const item = {
@@ -718,7 +784,9 @@ async function exportTopicsToMarkdown() {
       }
 
       imageIndex += 1;
-      await sleep(1000);
+      if (shouldSleep) {
+        await sleep(1000);
+      }
     }
     
     info(`topic ${topic.topic_id}: downloaded ${downloadedFiles.length}/${files.length} files, ${downloadedImages.length}/${images.length} images`);
@@ -773,6 +841,157 @@ async function exportTopicsToMarkdown() {
     attachments_dir: attachmentsRoot,
     files_downloaded: totalFileDownloaded,
     images_downloaded: totalImageDownloaded,
+    failed_count: failures.length,
+    failures,
+  }, null, 2));
+}
+
+// ── export-doc ───────────────────────────────────────────────
+async function exportDocumentAttachments() {
+  const arg1 = process.argv[3];
+  const arg2 = process.argv[4];
+  const arg3 = process.argv[5];
+  const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+
+  let targetDateStr;
+  let outputArg;
+  let groupTargets = [];
+
+  if (datePattern.test(arg1 || '')) {
+    targetDateStr = arg1;
+    const scopeOverride = arg2 === 'all' || arg2 === 'digests' ? arg2 : null;
+    outputArg = scopeOverride ? arg3 : arg2;
+
+    try {
+      const configuredGroups = loadConfiguredGroups();
+      groupTargets = configuredGroups.map((group) => ({
+        group_id: group.group_id,
+        scope: scopeOverride || group.scope,
+      }));
+    } catch (err) {
+      const errorMsg = JSON.stringify({ error: err.message });
+      console.error(errorMsg);
+      error(errorMsg);
+      process.exit(1);
+    }
+  } else {
+    const groupId = arg1;
+    targetDateStr = arg2;
+    const scope = arg3 || 'all';
+    outputArg = process.argv[6];
+
+    if (groupId) {
+      groupTargets = [{ group_id: groupId, scope }];
+    }
+  }
+
+  if (groupTargets.length === 0 || !targetDateStr || !datePattern.test(targetDateStr)) {
+    const errorMsg = JSON.stringify({ error: 'Usage: node fetch_topics.js export-doc <YYYY-MM-DD> [scope] [output_dir] OR node fetch_topics.js export-doc <group_id> <YYYY-MM-DD> [scope] [output_dir]' });
+    console.error(errorMsg);
+    error(errorMsg);
+    process.exit(1);
+  }
+
+  const targetDate = new Date(targetDateStr);
+  const month = String(targetDate.getMonth() + 1).padStart(2, '0');
+  const day = String(targetDate.getDate()).padStart(2, '0');
+  const dateSubDir = `${month}-${day}`;
+
+  const outputDir = resolveOutputDir(outputArg);
+  const attachmentsRoot = path.join(outputDir, 'asset', dateSubDir);
+
+  info(`exporting document attachments for ${groupTargets.length} group(s), date=${targetDateStr}`);
+  info(`output dir: ${outputDir}`);
+  info(`attachments dir: ${attachmentsRoot}`);
+
+  await ensureDir(outputDir);
+  await ensureDir(attachmentsRoot);
+
+  const failures = [];
+  let topicCounter = 0;
+  let documentTopicCount = 0;
+  let documentFileCount = 0;
+  let downloadedFileCount = 0;
+  let skippedAudioCount = 0;
+  const buildTopicProcessor = (currentGroupId) => async (topic) => {
+    topicCounter += 1;
+    info(`processing topic ${topicCounter} for export-doc: group=${currentGroupId}, topic=${topic.topic_id}`);
+
+    const files = Array.isArray(topic.files) ? topic.files : [];
+    const docFiles = [];
+
+    for (const file of files) {
+      if (isAudioFileName(file.name)) {
+        skippedAudioCount += 1;
+        info(`skipping audio file: ${file.name}`);
+        continue;
+      }
+      docFiles.push(file);
+    }
+
+    if (docFiles.length === 0) {
+      return;
+    }
+
+    documentTopicCount += 1;
+
+    let fileIndex = 1;
+    for (const file of docFiles) {
+      documentFileCount += 1;
+      let shouldSleep = true;
+      try {
+        const result = await downloadFileAttachment(file, attachmentsRoot, fileIndex, topic.topic_id);
+        shouldSleep = !result.skipped;
+        downloadedFileCount += 1;
+      } catch (err) {
+        failures.push({
+          group_id: currentGroupId,
+          topic_id: topic.topic_id,
+          kind: 'file',
+          id: file.file_id,
+          name: file.name || '',
+          error: err.message,
+        });
+      }
+
+      fileIndex += 1;
+      if (shouldSleep) {
+        await sleep(1000);
+      }
+    }
+  };
+
+  for (let i = 0; i < groupTargets.length; i += 1) {
+    const target = groupTargets[i];
+    info(`starting export-doc for group=${target.group_id}, scope=${target.scope}`);
+    await fetchAndProcessTopicsByDate(target.group_id, targetDateStr, target.scope, buildTopicProcessor(target.group_id));
+    if (i < groupTargets.length - 1) {
+      await sleep(2000);
+    }
+  }
+
+  info('========================================');
+  info('===== EXPORT-DOC COMPLETED =====');
+  info('========================================');
+  info(`Document topics: ${documentTopicCount}`);
+  info(`Document files: ${documentFileCount}`);
+  info(`Files downloaded: ${downloadedFileCount}`);
+  info(`Skipped audio files: ${skippedAudioCount}`);
+  info(`Failed downloads: ${failures.length}`);
+  info(`Attachments dir: ${attachmentsRoot}`);
+  info('========================================');
+
+  console.log(JSON.stringify({
+    group_id: groupTargets.length === 1 ? groupTargets[0].group_id : undefined,
+    group_ids: groupTargets.map((target) => target.group_id),
+    scopes: groupTargets.map((target) => ({ group_id: target.group_id, scope: target.scope })),
+    export_mode: `date (${targetDateStr})`,
+    output_dir: outputDir,
+    attachments_dir: attachmentsRoot,
+    document_topics_count: documentTopicCount,
+    document_files_count: documentFileCount,
+    files_downloaded: downloadedFileCount,
+    skipped_audio_count: skippedAudioCount,
     failed_count: failures.length,
     failures,
   }, null, 2));
@@ -857,7 +1076,7 @@ async function fetchAndProcessTopicsByDate(groupId, targetDateStr, scope, proces
           topic_id: String(rawTopic.topic_id),
           type: rawTopic.type,
           title: rawTopic.title || '',
-          text: extractTopicText(rawTopic).substring(0, 2000),
+          text: extractTopicText(rawTopic),
           create_time: rawTopic.create_time,
           owner: ownerObj ? { user_id: String(ownerObj.user_id), name: ownerObj.name } : null,
           likes_count: rawTopic.likes_count || 0,
@@ -905,7 +1124,7 @@ async function fetchAndProcessTopicsByDate(groupId, targetDateStr, scope, proces
 // ── parse-doc ────────────────────────────────────────────────
 async function parseDocFiles() {
   const docDir = process.argv[3];
-  const outputArg = process.argv[4] || 'archive';
+  const outputArg = process.argv[4];
 
   if (!docDir) {
     const errorMsg = JSON.stringify({ error: 'Usage: node fetch_topics.js parse-doc <doc_dir> [output_dir]' });
@@ -930,7 +1149,7 @@ async function parseDocFiles() {
   const month = String(now.getMonth() + 1).padStart(2, '0');
   const day = String(now.getDate()).padStart(2, '0');
 
-  const outputDir = path.resolve(process.cwd(), outputArg);
+  const outputDir = resolveOutputDir(outputArg);
   const outputPath = path.join(outputDir, `${month}-${day}-doc.md`);
 
   await ensureDir(outputDir);
@@ -1134,6 +1353,9 @@ async function fetchGroups() {
       case 'export-md':
         await exportTopicsToMarkdown();
         break;
+      case 'export-doc':
+        await exportDocumentAttachments();
+        break;
       case 'parse-doc':
         await parseDocFiles();
         break;
@@ -1141,7 +1363,7 @@ async function fetchGroups() {
         await fetchGroups();
         break;
       default:
-        const errorMsg = `Unknown subcommand: ${subcommand}. Use: export-md, parse-doc, groups`;
+        const errorMsg = `Unknown subcommand: ${subcommand}. Use: export-md, export-doc, parse-doc, groups`;
         console.error(errorMsg);
         error(errorMsg);
         process.exit(1);
