@@ -4,7 +4,8 @@
   "description": "知识星球内容抓取与汇总",
   "main": "fetch_topics.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "filter-focus": "node filter_focus_topics.js"
   },
   "keywords": [],
   "author": "",

@@ -9,7 +9,7 @@
 - 抓取指定星球的最新帖子（支持全部 / 仅精华）
 - 自动下载并解析文档附件（PDF、DOCX），提取研报关键内容
 - **智能筛选与分批汇总**，优先展示高价值内容
-- AI 生成六段式投资分析报告（观点摘要 → 研报提炼 → 重点标的追踪 → 趋势分析 → 投资建议 → 免责声明）
+- AI 生成完整投资分析报告（数据概览 → 观点摘要 → 研报提炼 → 重点标的追踪 → 趋势分析 → 投资建议 → 免责声明）
 - 支持多星球配置
 - 内置限速与指数退避重试
 - 文件存在性检查，避免重复下载
@@ -90,12 +90,15 @@ Skill 会自动执行：
 2. 下载所有附件（PDF、图片、音频等）到本地
 3. 解析 Markdown 文件和 PDF/DOCX 附件
 4. 生成完整的分析报告
+5. 将报告写入 `report/MM-DD.md`
+
+如果用户只要求“下载某天文档附件”，则优先使用 `export-doc`，不走完整分析流程。
 
 **优势**：
 - 所有附件自动下载到本地，无需担心链接过期
 - 支持离线查阅
-- 附件按日期归档在 `archive/asset/MM-DD/`
-- 每100个帖子自动分文件，便于管理
+- 默认会归档到 skill 目录下的 `archive/asset/MM-DD/`
+- 图文帖子与文档附件帖子自动分离，便于后续分析
 
 ## 子命令参考
 
@@ -105,12 +108,36 @@ Skill 会自动执行：
 # 导出帖子到 Markdown，并下载附件（按日期导出）
 node fetch_topics.js export-md <group_id> <YYYY-MM-DD> [scope] [output_dir]
 
+# 只下载指定日期帖子中的文档附件
+node fetch_topics.js export-doc <YYYY-MM-DD> [scope] [output_dir]
+# 或显式指定 group_id
+node fetch_topics.js export-doc <group_id> <YYYY-MM-DD> [scope] [output_dir]
+
 # 解析文档文件（PDF 和 DOCX）
 node fetch_topics.js parse-doc <doc_dir> [output_dir]
 
 # 列出已加入的星球
 node fetch_topics.js groups
 ```
+
+### 重点标的筛选（苹果 & 特斯拉）
+
+新增 `filter_focus_topics.js`，用于对图文帖子和文档解析结果做三档筛选（强相关 / 弱相关 / 丢弃）：
+
+```bash
+node filter_focus_topics.js <txtimg.md> <doc.md> [output_dir]
+```
+
+示例：
+
+```bash
+node filter_focus_topics.js archive/03-15-txtimg.md archive/03-15-doc.md archive
+```
+
+输出文件：
+- `03-15-apple.md` / `03-15-apple-weak.md`
+- `03-15-tesla.md` / `03-15-tesla-weak.md`
+- `03-15-focus-summary.json`
 
 ### 导出 Markdown 说明
 
@@ -121,6 +148,7 @@ node fetch_topics.js groups
 
 **特性**：
 - 自动分离图文帖子和附件帖子到不同文件
+- 帖子正文完整写入 Markdown，不截断到前 2000 字符
 - 附件按日期分目录存储在 `asset/MM-DD/`
 - 支持最多3次重试机制（分页请求和下载请求）
 - 流式处理：边获取边下载边写入，防止URL过期
@@ -134,6 +162,7 @@ node fetch_topics.js export-md <group_id> <YYYY-MM-DD> [scope] [output_dir]
 **文件命名规则**：
 - 图文帖子：`MM-DD-txtimg.md`（只包含文本和图片的帖子）
 - 附件帖子：`MM-DD-attachment.md`（包含文档附件的帖子）
+- 未传 `output_dir` 时，默认输出到 skill 目录下的 `archive/`
 
 **目录结构**：
 
@@ -166,7 +195,52 @@ ZSXQ_TOKEN=xxx node fetch_topics.js export-md 51122188845424 2026-03-14 all ./my
 - 同一天的所有附件存储在同一个日期目录下
 - 分页请求失败会自动重试最多3次（间隔2秒）
 - 下载请求失败会自动重试最多3次（指数退避：2秒、4秒、8秒）
-- 详细使用说明请参考 [EXPORT_USAGE.md](EXPORT_USAGE.md)
+- 精确输出路径请以命令返回 JSON 中的 `txtimg_file`、`attachment_file`、`attachments_dir` 为准
+
+### 导出文档附件说明
+
+`export-doc` 命令用于只下载指定日期帖子中的文档附件，不生成帖子 Markdown，也不会下载图片。
+
+**命令格式**：
+
+```bash
+node fetch_topics.js export-doc <YYYY-MM-DD> [scope] [output_dir]
+node fetch_topics.js export-doc <group_id> <YYYY-MM-DD> [scope] [output_dir]
+```
+
+**输出目录**：
+- 未传 `output_dir` 时，默认下载到 skill 目录下的 `archive/asset/MM-DD/`
+- 会跳过音频文件（`.mp3` / `.m4a` / `.wav`）
+- 只传日期时，会从 `groups.json` 读取目标星球并逐个下载
+- 精确输出路径以命令返回 JSON 为准，不要手工猜测
+
+**使用示例**：
+
+```bash
+# 按 groups.json 下载 2026-03-14 的全部文档附件
+ZSXQ_TOKEN=xxx node fetch_topics.js export-doc 2026-03-14 all
+
+# 显式指定某个 group_id
+ZSXQ_TOKEN=xxx node fetch_topics.js export-doc 51122188845424 2026-03-14 digests
+```
+
+**输出格式**：
+
+```json
+{
+  "group_ids": ["51122188845424"],
+  "scopes": [{ "group_id": "51122188845424", "scope": "all" }],
+  "export_mode": "date (2026-03-14)",
+  "output_dir": "/path/to/archive",
+  "attachments_dir": "/path/to/archive/asset/03-14",
+  "document_topics_count": 12,
+  "document_files_count": 34,
+  "files_downloaded": 34,
+  "skipped_audio_count": 2,
+  "failed_count": 0,
+  "failures": []
+}
+```
 
 ### 解析文档文件说明
 
@@ -180,13 +254,13 @@ node fetch_topics.js parse-doc <doc_dir> [output_dir]
 
 **参数说明**：
 - `doc_dir`: 文档文件所在目录（支持递归扫描子目录）
-- `output_dir`: 输出目录，默认 `archive`
+- `output_dir`: 输出目录，默认 skill 目录下的 `archive`
 
 **特性**：
 - 递归扫描目录下所有 PDF 和 DOCX 文件
 - 自动跳过图片型文档（文本长度 < 50 字符）
 - 以文件名为标题，不同文档之间用 `---` 分隔
-- 输出文件名：`MM-DD-doc.md`
+- 输出文件名为**执行命令当天日期**对应的 `MM-DD-doc.md`
 - 分别统计 PDF 和 DOCX 的解析情况
 
 **使用示例**：
@@ -198,6 +272,10 @@ node fetch_topics.js parse-doc archive/asset/03-15
 # 指定输出目录
 node fetch_topics.js parse-doc archive/asset/03-15 output
 ```
+
+**重要说明**：
+- 请以命令返回 JSON 中的 `output_file` 为准读取解析结果
+- 不要假设输出文件名一定与源目录日期一致
 
 **输出格式**：
 
@@ -229,14 +307,27 @@ node fetch_topics.js parse-doc archive/asset/03-15 output
 
 ## 报告格式
 
-生成的报告包含六个部分：
+完整分析报告建议按以下结构输出：
 
-1. **帖子观点摘要** — 按星球分组，提炼核心投资观点
-2. **文档附件研报精华提炼** — 关键结论、数据要点、重点标的
-3. **重点标的追踪（苹果 & 特斯拉）** — 专门汇总苹果和特斯拉相关内容
-4. **市场主题与趋势分析** — 热点方向、板块热度、多空分歧
-5. **投资参考建议** — 共识机会、风险点、跟踪标的
-6. **免责声明**
+1. **数据概览** — 处理日期、帖子总数、文档总数、处理进度、处理时长、关键统计
+2. **帖子观点摘要** — 合并相似观点后输出核心观点，最多展示 50 条
+3. **文档附件研报精华提炼** — 优先展示高相关、高权威研报，最多展示 20-30 份核心研报
+4. **重点标的追踪（苹果 & 特斯拉）** — 强相关内容形成结论，弱相关内容仅作背景补充
+5. **市场主题与趋势分析** — 热点方向、板块热度、多空分歧、市场情绪
+6. **投资参考建议** — 共识机会、风险点、跟踪标的、可能的操作思路
+7. **免责声明**
+
+报告生成约束：
+- 优先合并重复观点和重复研报，不要机械罗列原文
+- 明确区分“帖子观点”和“文档研报观点”
+- 苹果 / 特斯拉章节只允许基于强相关内容给出明确结论
+- 当文档很多时，应补一个“其他研报概览”
+- 如果没有文档附件或全部解析失败，应明确写出“本批次无文档附件”或“文档均为扫描件/无法提取文本”
+
+报告落盘约定：
+- 完整分析流程的最终报告应写入 `report/MM-DD.md`
+- `MM-DD` 取自用户请求的目标日期，而不是 `parse-doc` 执行当天的输出名
+- 同一天重复执行时，覆盖同名报告以保留最新版本
 
 ## 依赖
 
