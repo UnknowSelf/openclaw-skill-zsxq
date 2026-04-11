@@ -50,9 +50,6 @@ node {baseDir}/fetch_topics.js export-doc <group_id> <YYYY-MM-DD> [scope] [outpu
 # 解析指定目录下的 PDF / DOCX
 node {baseDir}/fetch_topics.js parse-doc <doc_dir> [output_dir]
 
-# 列出已加入星球
-node {baseDir}/fetch_topics.js groups
-
 # 筛选苹果 / 特斯拉相关内容
 node {baseDir}/filter_focus_topics.js <txtimg.md> <doc.md> [output_dir]
 ```
@@ -75,7 +72,7 @@ node {baseDir}/filter_focus_topics.js <txtimg.md> <doc.md> [output_dir]
 - 解析目标日期
 - 将目标日期同步转换为报告文件名 `MM-DD.md`
 - 确保 `{baseDir}/report` 目录存在；不存在时先创建
-- 读取 `{baseDir}/groups.json`
+- 读取 `{baseDir}/groups.json` 配置文件
 - 对每个星球使用其配置的 `group_id` 和 `scope`
 
 `groups.json` 结构示例：
@@ -91,9 +88,12 @@ node {baseDir}/filter_focus_topics.js <txtimg.md> <doc.md> [output_dir]
 ]
 ```
 
+关键约束：
+- 如果环境变量 ZSXQ_TOKEN 未设置 或 {baseDir}/groups.json 配置文件读取失败则报错，不再继续执行
+
 ### 2. 导出帖子与附件
 
-对每个星球执行：
+对 groups.json 配置文件中每个星球，执行：
 
 ```bash
 node {baseDir}/fetch_topics.js export-md <group_id> <YYYY-MM-DD> <scope> {baseDir}/archive
